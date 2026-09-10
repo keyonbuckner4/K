@@ -313,6 +313,38 @@ async def cmd_dashboard(args, settings):
         storage.close()
 
 
+async def cmd_setup(args, settings):
+    """Guided first run: keys -> .env -> connection check, in plain language."""
+    import os
+
+    from .setup_cmd import run_setup
+
+    run_setup(settings.root)
+    fresh_env = {k: v for k, v in os.environ.items() if not k.startswith("KALSHI_") and k != "CONFIRM_LIVE"}
+    settings = load_settings(settings.root, environ=fresh_env)
+    print("\nChecking the connection to Kalshi demo...")
+    eng = _engine(args, settings)
+    try:
+        report = await eng.doctor()
+        working = [pr for pr in report["probes"] if pr.get("status_code") == 200]
+        if not working:
+            print("Could not reach any Kalshi host. Details:")
+            _print(report["probes"])
+            print("Check your internet connection, then run `uv run bot doctor` again.")
+            return
+        if working[0]["rest"] != settings.rest_base_url:
+            print(f"Note: the configured host did not answer but {working[0]['rest']} did. Put that pair into [hosts.demo] in config/bot.toml.")
+        auth = report.get("auth", {})
+        if not auth.get("ok"):
+            print(f"Kalshi reached, but the key was rejected: {auth.get('error')}")
+            print("Usual causes: a production key entered as the demo key, a key deleted on the site, or a computer clock that is off.")
+            return
+        print(f"Setup complete. Demo balance: ${auth['balance_cents'] / 100:.2f}. Positions value: ${auth['portfolio_value_cents'] / 100:.2f}.")
+        print("Next: `uv run bot scan -v` for one observe-only pass, then `uv run bot run --dashboard` to keep observing.")
+    finally:
+        await eng.close()
+
+
 def cmd_halt(args, settings):
     halt_mod.engage(settings.halt_path, args.reason or "manual")
     print(f"HALT engaged at {settings.halt_path}. All order placement is blocked until `bot resume --file`.")
@@ -345,6 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("setup", help="guided first run: enter keys, write .env, check the connection")
     sub.add_parser("balance", help="authenticate and print the balance")
     sub.add_parser("doctor", help="probe Kalshi hosts, auth, and rate limits")
     s = sub.add_parser("status", help="risk state, halts, positions")
@@ -407,7 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"balance": cmd_balance, "doctor": cmd_doctor, "status": cmd_status, "markets": cmd_markets, "events": cmd_events, "book": cmd_book,
+COMMANDS = {"setup": cmd_setup, "balance": cmd_balance, "doctor": cmd_doctor, "status": cmd_status, "markets": cmd_markets, "events": cmd_events, "book": cmd_book,
             "series": cmd_series, "scan": cmd_scan, "run": cmd_run, "watch": cmd_watch, "positions": cmd_positions, "orders": cmd_orders,
             "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "review": cmd_review, "gaps": cmd_gaps,
             "decisions": cmd_decisions, "dashboard": cmd_dashboard}
@@ -421,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    setup_logging(settings.root, settings.env, args.log_level, quiet=args.quiet or args.cmd in ("halt", "resume", "status", "gaps", "decisions"))
+    setup_logging(settings.root, settings.env, args.log_level, quiet=args.quiet or args.cmd in ("halt", "resume", "status", "gaps", "decisions", "setup"))
     _banner(settings)
     try:
         if args.cmd in SYNC_COMMANDS:

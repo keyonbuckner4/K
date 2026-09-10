@@ -8,13 +8,14 @@ order behind one RiskEngine, demo by default, observe-only by default.
 
 ```bash
 uv sync                                   # Python 3.11+, installs httpx / websockets / cryptography
-cp .env.example .env                      # then fill in:
-#   KALSHI_API_KEY_ID=<demo key id>            KALSHI_PRIVATE_KEY_PATH=./kalshi-demo.pem
-#   KALSHI_LIVE_API_KEY_ID=<production key id> KALSHI_LIVE_PRIVATE_KEY_PATH=./kalshi-live.pem
-uv run bot doctor                         # probes both Kalshi host families, checks auth + rate limits
+uv run bot setup                          # asks for your key IDs, saves the keys, writes .env, checks the connection
 uv run bot balance                        # Session-1 gate: demo balance prints
 uv run pytest                             # everything passes offline, no credentials needed
 ```
+
+`bot setup` is the guided path. The manual equivalent is `cp .env.example .env` and filling in
+`KALSHI_API_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH` for demo and `KALSHI_LIVE_API_KEY_ID` /
+`KALSHI_LIVE_PRIVATE_KEY_PATH` for production, then `uv run bot doctor`.
 
 Both keys sit in `.env` side by side. Demo commands read only the demo key. Production needs
 `--live` on the command line and `CONFIRM_LIVE=yes` in `.env`, and then reads only the
