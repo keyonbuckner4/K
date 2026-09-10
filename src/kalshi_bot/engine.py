@@ -343,7 +343,8 @@ class Engine:
         """Probe every known host family with an unsigned GET /exchange/status, then a signed balance call."""
         import httpx
 
-        out: dict[str, Any] = {"env": self.settings.env, "configured": {"rest": self.settings.rest_base_url, "ws": self.settings.ws_url}, "probes": []}
+        out: dict[str, Any] = {"env": self.settings.env, "configured": {"rest": self.settings.rest_base_url, "ws": self.settings.ws_url},
+                               "key_source": self.settings.key_source, "credential_error": self.settings.credential_error, "probes": []}
         candidates = [(self.settings.rest_base_url, self.settings.ws_url)] + [h for h in KNOWN_HOSTS.get(self.settings.env, []) if h[0] != self.settings.rest_base_url]
         async with httpx.AsyncClient(timeout=10.0, transport=self.transport) as http:
             for rest, ws in candidates:
@@ -367,5 +368,5 @@ class Engine:
             except Exception as e:
                 out["limits"] = {"error": str(e)}
         else:
-            out["auth"] = {"ok": False, "error": "no credentials in .env"}
+            out["auth"] = {"ok": False, "error": self.settings.credential_error or "no credentials in .env"}
         return out

@@ -8,16 +8,18 @@ order behind one RiskEngine, demo by default, observe-only by default.
 
 ```bash
 uv sync                                   # Python 3.11+, installs httpx / websockets / cryptography
-cp .env.example .env                      # then edit:
-#   KALSHI_API_KEY_ID=<key id from https://demo.kalshi.co profile -> API keys>
-#   KALSHI_PRIVATE_KEY_PATH=./kalshi-demo.pem   (the private key Kalshi showed you once)
+cp .env.example .env                      # then fill in:
+#   KALSHI_API_KEY_ID=<demo key id>            KALSHI_PRIVATE_KEY_PATH=./kalshi-demo.pem
+#   KALSHI_LIVE_API_KEY_ID=<production key id> KALSHI_LIVE_PRIVATE_KEY_PATH=./kalshi-live.pem
 uv run bot doctor                         # probes both Kalshi host families, checks auth + rate limits
 uv run bot balance                        # Session-1 gate: demo balance prints
 uv run pytest                             # everything passes offline, no credentials needed
 ```
 
-Production needs both `--live` on the command line and `CONFIRM_LIVE=yes` in `.env`, with a
-separate production key. Nothing else switches environments.
+Both keys sit in `.env` side by side. Demo commands read only the demo key. Production needs
+`--live` on the command line and `CONFIRM_LIVE=yes` in `.env`, and then reads only the
+`KALSHI_LIVE_*` key; it refuses to start if that key is missing or is the same key as demo.
+Save private keys as `*.pem` files so `.gitignore` covers them.
 
 ## Commands
 

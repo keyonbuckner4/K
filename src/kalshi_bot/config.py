@@ -88,6 +88,8 @@ class Settings:
     db_path: Path
     halt_path: Path
     toml: dict[str, Any] = field(default_factory=dict, repr=False)
+    key_source: str = ""          # which .env variables the credentials came from
+    credential_error: str | None = None
 
     @property
     def is_live(self) -> bool:
@@ -98,10 +100,10 @@ class Settings:
         return bool(self.api_key_id) and self.private_key_path is not None and self.private_key_path.exists()
 
     def require_credentials(self) -> None:
-        if not self.api_key_id:
-            raise ConfigError("KALSHI_API_KEY_ID is not set (put it in .env)")
-        if self.private_key_path is None or not self.private_key_path.exists():
-            raise ConfigError(f"KALSHI_PRIVATE_KEY_PATH does not point to a file: {self.private_key_path}")
+        if self.credential_error:
+            raise ConfigError(self.credential_error)
+        if not self.api_key_id or self.private_key_path is None or not self.private_key_path.exists():
+            raise ConfigError(f"credentials for {self.env} are incomplete ({self.key_source}); check .env")
 
     def section(self, *keys: str, default: Any = None) -> Any:
         node: Any = self.toml
@@ -110,6 +112,53 @@ class Settings:
                 return default
             node = node[k]
         return node
+
+
+def _path(raw: str, root: Path) -> Path | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else (root / p).resolve()
+
+
+def resolve_credentials(env: str, environ: Mapping[str, str], root: Path) -> tuple[str | None, Path | None, str, str | None]:
+    """Pick the key for the environment. Demo and live keys live side by side in .env:
+
+    * demo reads KALSHI_DEMO_API_KEY_ID / KALSHI_DEMO_PRIVATE_KEY_PATH, falling back to the
+      generic KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH;
+    * live reads KALSHI_LIVE_API_KEY_ID / KALSHI_LIVE_PRIVATE_KEY_PATH and nothing else, so a
+      demo key can never be sent to production by accident.
+    Returns (key_id, key_path, source_label, error_message_or_None).
+    """
+    if env == LIVE:
+        key_id = environ.get("KALSHI_LIVE_API_KEY_ID", "").strip() or None
+        key_path = _path(environ.get("KALSHI_LIVE_PRIVATE_KEY_PATH", ""), root)
+        source = "KALSHI_LIVE_API_KEY_ID / KALSHI_LIVE_PRIVATE_KEY_PATH"
+        if not key_id or key_path is None:
+            return key_id, key_path, source, "live needs KALSHI_LIVE_API_KEY_ID and KALSHI_LIVE_PRIVATE_KEY_PATH in .env (a separate production key)"
+        demo_path = _path(environ.get("KALSHI_DEMO_PRIVATE_KEY_PATH", "") or environ.get("KALSHI_PRIVATE_KEY_PATH", ""), root)
+        demo_id = environ.get("KALSHI_DEMO_API_KEY_ID", "").strip() or environ.get("KALSHI_API_KEY_ID", "").strip()
+        if demo_path is not None and demo_path == key_path:
+            return key_id, key_path, source, "live and demo must use different private key files (KALSHI_LIVE_PRIVATE_KEY_PATH equals the demo path)"
+        if demo_id and demo_id == key_id:
+            return key_id, key_path, source, "live and demo must use different API keys (KALSHI_LIVE_API_KEY_ID equals the demo key id)"
+        if not key_path.exists():
+            return key_id, key_path, source, f"KALSHI_LIVE_PRIVATE_KEY_PATH does not point to a file: {key_path}"
+        return key_id, key_path, source, None
+    if environ.get("KALSHI_DEMO_API_KEY_ID", "").strip():
+        key_id = environ["KALSHI_DEMO_API_KEY_ID"].strip()
+        key_path = _path(environ.get("KALSHI_DEMO_PRIVATE_KEY_PATH", "") or environ.get("KALSHI_PRIVATE_KEY_PATH", ""), root)
+        source = "KALSHI_DEMO_API_KEY_ID / KALSHI_DEMO_PRIVATE_KEY_PATH"
+    else:
+        key_id = environ.get("KALSHI_API_KEY_ID", "").strip() or None
+        key_path = _path(environ.get("KALSHI_PRIVATE_KEY_PATH", ""), root)
+        source = "KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH"
+    if not key_id:
+        return key_id, key_path, source, "demo needs KALSHI_API_KEY_ID (or KALSHI_DEMO_API_KEY_ID) in .env"
+    if key_path is None or not key_path.exists():
+        return key_id, key_path, source, f"demo private key file not found: {key_path} (set KALSHI_PRIVATE_KEY_PATH)"
+    return key_id, key_path, source, None
 
 
 def load_settings(root: Path | None = None, live: bool = False, environ: dict[str, str] | None = None,
@@ -132,8 +181,7 @@ def load_settings(root: Path | None = None, live: bool = False, environ: dict[st
     if not rest.startswith("https://") or not ws.startswith("wss://"):
         raise ConfigError(f"[hosts.{env}] must use https:// and wss:// (got {rest!r}, {ws!r})")
 
-    key_path_raw = env_map.get("KALSHI_PRIVATE_KEY_PATH", "").strip()
-    key_path = (root / key_path_raw).resolve() if key_path_raw and not Path(key_path_raw).is_absolute() else (Path(key_path_raw) if key_path_raw else None)
+    key_id, key_path, key_source, cred_error = resolve_credentials(env, env_map, root)
     db_rel = toml.get("storage", {}).get("db_path", "data/bot.db")
     db_path = root / f"{db_rel}" if not Path(db_rel).is_absolute() else Path(db_rel)
     if env == LIVE:
@@ -146,10 +194,12 @@ def load_settings(root: Path | None = None, live: bool = False, environ: dict[st
         root=root,
         rest_base_url=rest,
         ws_url=ws,
-        api_key_id=env_map.get("KALSHI_API_KEY_ID", "").strip() or None,
+        api_key_id=key_id,
         private_key_path=key_path,
         alert_webhook_url=env_map.get("ALERT_WEBHOOK_URL", "").strip() or None,
         db_path=db_path,
         halt_path=root / "HALT",
         toml=toml,
+        key_source=key_source,
+        credential_error=cred_error,
     )

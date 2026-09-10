@@ -43,7 +43,8 @@ def _engine(args: argparse.Namespace, settings: Settings, trade: bool = False, u
 
 def _banner(settings: Settings) -> None:
     tag = "LIVE  (real money)" if settings.is_live else "demo"
-    print(f"kalshi-bot {__version__} | env={tag} | rest={settings.rest_base_url} | db={settings.db_path}", file=sys.stderr)
+    key = f"{settings.api_key_id[:6]}… from {settings.key_source}" if settings.has_credentials else "none"
+    print(f"kalshi-bot {__version__} | env={tag} | rest={settings.rest_base_url} | key={key} | db={settings.db_path}", file=sys.stderr)
 
 
 # ---- commands ------------------------------------------------------------------------------------

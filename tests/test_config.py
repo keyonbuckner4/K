@@ -73,3 +73,46 @@ def test_insecure_scheme_rejected(root):
 def test_parse_dotenv_quotes_and_comments():
     d = config.parse_dotenv('A=1\nB="two words"\nC=\'x\'\nexport D=4 # trailing\n\n#E=5\nF\n')
     assert d == {"A": "1", "B": "two words", "C": "x", "D": "4"}
+
+
+def test_live_and_demo_keys_live_side_by_side(root):
+    (root / "demo.pem").write_text("k")
+    (root / "live.pem").write_text("k")
+    env = {"KALSHI_API_KEY_ID": "demo-id", "KALSHI_PRIVATE_KEY_PATH": "./demo.pem",
+           "KALSHI_LIVE_API_KEY_ID": "live-id", "KALSHI_LIVE_PRIVATE_KEY_PATH": "./live.pem", "CONFIRM_LIVE": "yes"}
+    demo = config.load_settings(root, live=False, environ=dict(env))
+    assert demo.api_key_id == "demo-id" and demo.private_key_path == (root / "demo.pem").resolve() and demo.has_credentials
+    live = config.load_settings(root, live=True, environ=dict(env))
+    assert live.api_key_id == "live-id" and live.private_key_path == (root / "live.pem").resolve() and live.has_credentials
+    assert "LIVE" in live.key_source
+    live.require_credentials()
+
+
+def test_live_never_falls_back_to_the_demo_key(root):
+    (root / "demo.pem").write_text("k")
+    env = {"KALSHI_API_KEY_ID": "demo-id", "KALSHI_PRIVATE_KEY_PATH": "./demo.pem", "CONFIRM_LIVE": "yes"}
+    live = config.load_settings(root, live=True, environ=env)
+    assert live.api_key_id is None and not live.has_credentials
+    with pytest.raises(ConfigError, match="KALSHI_LIVE_API_KEY_ID"):
+        live.require_credentials()
+
+
+def test_live_refuses_the_same_key_as_demo(root):
+    (root / "one.pem").write_text("k")
+    env = {"KALSHI_API_KEY_ID": "demo-id", "KALSHI_PRIVATE_KEY_PATH": "./one.pem",
+           "KALSHI_LIVE_API_KEY_ID": "live-id", "KALSHI_LIVE_PRIVATE_KEY_PATH": "./one.pem", "CONFIRM_LIVE": "yes"}
+    with pytest.raises(ConfigError, match="different private key files"):
+        config.load_settings(root, live=True, environ=env).require_credentials()
+    env["KALSHI_LIVE_PRIVATE_KEY_PATH"] = "./two.pem"
+    (root / "two.pem").write_text("k")
+    env["KALSHI_LIVE_API_KEY_ID"] = "demo-id"
+    with pytest.raises(ConfigError, match="different API keys"):
+        config.load_settings(root, live=True, environ=env).require_credentials()
+
+
+def test_demo_specific_variables_take_precedence(root):
+    (root / "d.pem").write_text("k")
+    env = {"KALSHI_API_KEY_ID": "generic", "KALSHI_PRIVATE_KEY_PATH": "./missing.pem",
+           "KALSHI_DEMO_API_KEY_ID": "demo-only", "KALSHI_DEMO_PRIVATE_KEY_PATH": "./d.pem"}
+    s = config.load_settings(root, live=False, environ=env)
+    assert s.api_key_id == "demo-only" and s.has_credentials and "DEMO" in s.key_source
