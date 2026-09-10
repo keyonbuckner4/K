@@ -302,7 +302,7 @@ class Engine:
                                               event_ticker=intent.event_ticker, details=intent.to_dict())
                     rep.executed.append({"intent_id": intent.intent_id, "status": "no_credentials"})
                     continue
-                result = await self.executor_for(strat).execute(intent, snapshot)
+                result = await self.executor_for(strat).execute(intent, snapshot, now)
                 rep.executed.append({"intent_id": intent.intent_id, "status": result.status, "reason": result.reason, "strategy": strat.name})
                 if result.status in ("filled", "partial", "unwound"):
                     snapshot = await self.account.refresh(force=True)

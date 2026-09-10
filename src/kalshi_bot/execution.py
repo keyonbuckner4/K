@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -72,9 +73,9 @@ class Executor:
         self.alerts = alerts
 
     # ---- entry point ------------------------------------------------------------------------
-    async def execute(self, intent: Intent, snapshot: AccountSnapshot) -> ExecutionResult:
+    async def execute(self, intent: Intent, snapshot: AccountSnapshot, now: datetime | None = None) -> ExecutionResult:
         try:
-            approval = self.risk.approve(intent, snapshot)
+            approval = self.risk.approve(intent, snapshot, now)
         except Halted as e:
             self._log(intent, "risk", False, f"halted: {e}")
             return ExecutionResult(intent, self.mode, "halted", str(e))

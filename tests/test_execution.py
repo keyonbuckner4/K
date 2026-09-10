@@ -50,7 +50,7 @@ def build(tmp_path, exchange, mode):
     lim = SharedRateLimiter(RateBudget(200, 400), RateBudget(100, 100), 10, 0.3)
     client = KalshiClient(s, lim, auth.KalshiSigner("kid", KEY), transport=httpx.MockTransport(exchange.handler))
     storage = Storage(tmp_path / "x.db")
-    return Executor(client, storage, RiskEngine(storage, s), mode=mode), storage
+    return Executor(client, storage, RiskEngine(storage, s, clock=lambda: NOW), mode=mode), storage
 
 
 def directional():
