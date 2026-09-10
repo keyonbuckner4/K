@@ -1,0 +1,157 @@
+# Non-secret configuration. Secrets (key id, private key path, CONFIRM_LIVE) live in .env only.
+# Risk limits are NOT here: they are hard-coded in src/kalshi_bot/risk.py to match BRIEF.md.
+
+[hosts.demo]
+# Kalshi's API docs (2026) call the external-api hosts the recommended Trade API hosts.
+# The older hosts still served by Kalshi's own SDK are:
+#   rest = "https://demo-api.kalshi.co/trade-api/v2"
+#   ws   = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+# `bot doctor` probes both families and tells you which one answers.
+rest = "https://external-api.demo.kalshi.co/trade-api/v2"
+ws = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+
+[hosts.live]
+# Older equivalents: https://api.elections.kalshi.com/trade-api/v2 and
+#                    wss://api.elections.kalshi.com/trade-api/ws/v2
+rest = "https://external-api.kalshi.com/trade-api/v2"
+ws = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
+[storage]
+db_path = "data/bot.db"   # the bot appends .demo / .live before the extension
+
+[ratelimit]
+# Fallback only. The bot reads GET /account/limits at startup and uses the live numbers.
+# Basic tier per the docs: read 200 tokens/s (2 s of burst), write 100 tokens/s (1 s), 10 tokens per request.
+fallback_read_tokens_per_sec = 200
+fallback_read_capacity = 400
+fallback_write_tokens_per_sec = 100
+fallback_write_capacity = 100
+tokens_per_request = 10
+write_reserve_fraction = 0.3    # never let background work consume the last 30% of the write bucket
+
+[fees]
+# The bot reads fee_type / fee_multiplier for every series from GET /series/{ticker}.
+# default_multiplier is only used for display in observe mode when a series has not been fetched.
+default_multiplier = 0.07
+maker_multiplier = 0.0175        # applied only on series whose fee_type is quadratic_with_maker_fees
+# series_overrides = { KXEXAMPLE = 0.07 }        # force a taker multiplier for a series
+# flat_fee_per_contract = { KXEXAMPLE = 0.01 }   # required for any series with fee_type = "flat"
+
+[gate]
+min_net_edge_cents = 5
+max_spread_cents = 3
+min_depth_multiple = 2
+min_minutes_to_settlement = 10
+
+[engine]
+scan_interval_sec = 30
+series_cache_ttl_sec = 21600
+market_cache_ttl_sec = 20
+positions_cache_ttl_sec = 5
+max_events_per_series = 6
+# Categories the bot will never trade (BRIEF.md non-goals). Matched case-insensitively as substrings.
+blocked_categories = ["sport", "politic", "election", "culture", "entertainment"]
+
+[execution]
+default_contracts = 5            # contracts per leg when the risk math allows more
+time_in_force = "immediate_or_cancel"   # entries are marketable limit orders; never market orders
+self_trade_prevention_type = "taker_at_cross"
+order_timeout_sec = 10
+
+[alerts]
+min_level = "warning"           # info | warning | critical
+
+[dashboard]
+host = "127.0.0.1"
+port = 8787
+
+[strategies.ladder_arb]
+enabled = true
+mode = "observe"                 # observe | trade   (trade also requires `bot run --trade`)
+series = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHAUS", "KXHIGHDEN", "KXHIGHLAX", "KXHIGHPHIL", "KXLOWNY", "KXBTCD", "KXETHD"]
+max_contracts_per_leg = 5
+max_legs = 12
+
+[strategies.weather]
+enabled = true
+mode = "observe"
+max_contracts = 5
+# Forecast error model: daily-high forecast error is treated as Normal(0, sigma) with
+# sigma = sigma_f_day0 + sigma_f_per_day * lead_days. NWS day-1 high MAE is roughly 2-3 F.
+sigma_f_day0 = 2.3
+sigma_f_per_day = 0.7
+nws_user_agent = "kalshi-bot (set your email in config)"
+
+# Each city: Kalshi series tickers, the NWS station the market settles on, and its coordinates.
+# VERIFY the station against each market's rules_primary text before trading (the bot logs it).
+[[strategies.weather.cities]]
+name = "New York City (Central Park)"
+series_high = "KXHIGHNY"
+series_low = "KXLOWNY"
+station = "KNYC"
+lat = 40.7789
+lon = -73.9692
+
+[[strategies.weather.cities]]
+name = "Chicago (Midway)"
+series_high = "KXHIGHCHI"
+series_low = "KXLOWCHI"
+station = "KMDW"
+lat = 41.7868
+lon = -87.7522
+
+[[strategies.weather.cities]]
+name = "Miami"
+series_high = "KXHIGHMIA"
+series_low = "KXLOWMIA"
+station = "KMIA"
+lat = 25.7959
+lon = -80.2870
+
+[[strategies.weather.cities]]
+name = "Austin"
+series_high = "KXHIGHAUS"
+series_low = "KXLOWAUS"
+station = "KAUS"
+lat = 30.1975
+lon = -97.6664
+
+[[strategies.weather.cities]]
+name = "Denver"
+series_high = "KXHIGHDEN"
+series_low = "KXLOWDEN"
+station = "KDEN"
+lat = 39.8561
+lon = -104.6737
+
+[[strategies.weather.cities]]
+name = "Los Angeles"
+series_high = "KXHIGHLAX"
+series_low = "KXLOWLAX"
+station = "KLAX"
+lat = 33.9425
+lon = -118.4081
+
+[[strategies.weather.cities]]
+name = "Philadelphia"
+series_high = "KXHIGHPHIL"
+series_low = "KXLOWPHIL"
+station = "KPHL"
+lat = 39.8721
+lon = -75.2411
+
+[strategies.crypto]
+enabled = true
+mode = "observe"
+max_contracts = 5
+series = { BTC = "KXBTCD", ETH = "KXETHD" }
+spot_source = "kraken"           # public, no key: https://api.kraken.com/0/public/Ticker
+vol_source = "realized"          # realized (Kraken 1-minute candles) | deribit_dvol
+realized_vol_window_hours = 72
+min_minutes_to_close = 20        # very short horizons make the barrier model fragile
+
+[strategies.economics]
+enabled = false
+mode = "observe"
+max_contracts = 5
+views_path = "config/econ_views.toml"   # your consensus distributions; see config/econ_views.example.toml

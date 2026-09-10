@@ -1,0 +1,9 @@
+# Consensus distributions for economics events. Copy to config/econ_views.toml and edit.
+# The economics strategy prices every market in an event from a Normal(mean, sd) view.
+# It refuses to price an event that has no view here. No placeholder data, ever.
+
+[[views]]
+event_ticker = "KXCPI-26SEP"      # event ticker exactly as Kalshi lists it
+mean = 0.3                          # consensus for the settlement value (e.g. monthly CPI % change)
+sd = 0.12                           # your standard deviation around consensus
+note = "Sept CPI MoM, consensus 0.3, surveyed sd 0.12"
