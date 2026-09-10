@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "websockets>=13,<18",
     "cryptography>=42",
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]
