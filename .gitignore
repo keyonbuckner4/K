@@ -1,7 +1,7 @@
 .env
 *.pem
 *.key
-data/
+/data/
 *.db
 *.db-journal
 *.db-wal
