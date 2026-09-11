@@ -49,6 +49,7 @@ min_minutes_to_settlement = 10
 # under --trade; "demo" / "live" force it. Orders are always priced from the venue they go to.
 market_data = "auto"
 scan_interval_sec = 30
+score_interval_sec = 3600        # how often `bot run` syncs settlements and re-scores the models for the dashboard
 series_cache_ttl_sec = 21600
 market_cache_ttl_sec = 20
 positions_cache_ttl_sec = 5

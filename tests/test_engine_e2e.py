@@ -229,3 +229,29 @@ def test_trade_mode_uses_the_trading_venue_for_data(tmp_path):
     settings = load_settings(root, environ={})
     with pytest.raises(ConfigError, match="cannot be combined with --trade"):
         Engine(settings, trade=True, transport=httpx.MockTransport(ex.handler), use_ws=False)
+
+
+def test_engine_scores_models_against_settlements(tmp_path):
+    from decimal import Decimal
+
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    settled = {"ticker": "KXHIGHNY-26SEP09-B76", "event_ticker": "KXHIGHNY-26SEP09", "status": "settled", "result": "yes",
+               "close_time": "2026-09-09T23:00:00Z", "expiration_time": "2026-09-10T12:00:00Z", "strike_type": "between", "floor_strike": "76", "cap_strike": "77"}
+    old_event = {"event_ticker": "KXHIGHNY-26SEP09", "series_ticker": "KXHIGHNY", "mutually_exclusive": True, "markets": [settled]}
+    ex = FakeKalshi([ev, old_event], books, SERIES)
+    eng = build(tmp_path, ex)
+    # a model view logged earlier for the now-settled market
+    eng.storage.log_decision("weather", "model", True, "candidate", market_ticker="KXHIGHNY-26SEP09-B76", model_prob=Decimal("0.7"),
+                             price=Decimal("0.40"), book_side="bid", count=5)
+
+    async def go():
+        card = await eng.score_models()
+        await eng.close()
+        return card
+
+    card = asyncio.run(go())
+    assert card["synced_results"] == 1 and card["n_scored"] == 1 and card["n_candidates"] == 1
+    assert card["brier_model"] < card["brier_market"]  # 0.7 vs market 0.40 on a YES settlement
+    from kalshi_bot.storage import Storage
+    st = Storage(eng.settings.db_path)
+    assert st.get_state("last_backtest")["n_scored"] == 1 and st.market_results(["KXHIGHNY-26SEP09-B76"]) == {"KXHIGHNY-26SEP09-B76": "yes"}

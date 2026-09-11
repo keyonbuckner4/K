@@ -68,3 +68,22 @@ def test_dashboard_renders_and_halt_button_works(tmp_path):
     finally:
         d.stop()
         s.close()
+
+
+def test_dashboard_renders_scorecard(tmp_path):
+    from kalshi_bot.dashboard import render_scorecard
+
+    assert "No settlements scored yet" in render_scorecard(None)
+    good = {"ts": time.time(), "n_scored": 12, "unresolved": 3, "n_candidates": 4, "pnl_cents": "35", "hit_rate": 0.75,
+            "brier_model": 0.18, "brier_market": 0.22, "calibration": [{"bucket": "0.6-0.7", "n": 5, "mean_p": 0.64, "realized": 0.6}],
+            "caveats": ["Sample: small"]}
+    html = render_scorecard(good)
+    assert "model beats the market" in html and "0.6-0.7" in html and "Sample: small" in html
+    bad = dict(good, brier_model=0.3)
+    assert "does NOT beat" in render_scorecard(bad)
+    st = settings(tmp_path)
+    s = Storage(st.db_path)
+    s.set_state("last_backtest", good)
+    page = render(status_payload(st, s))
+    assert "Model scorecard" in page and "model beats the market" in page and "last_backtest" not in page.split("Risk state")[1].split("Equity")[0]
+    s.close()

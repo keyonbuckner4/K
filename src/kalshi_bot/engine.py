@@ -19,6 +19,7 @@ from typing import Any
 from .account import AccountSnapshot, AccountView
 from .alerts import Alerts
 from .auth import KalshiSigner
+from .backtest import run_backtest, sync_results
 from .client import KalshiClient
 from .config import LIVE, Settings
 from .errors import ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
@@ -144,6 +145,8 @@ class Engine:
         self._feed_tickers: list[str] = []
         self.last_report: ScanReport | None = None
         self.last_fill_sync = time.time() - 3600
+        self.score_interval = float(eng_cfg.get("score_interval_sec", 3600))
+        self._last_score = 0.0
         self.stop = asyncio.Event()
 
     # ---- lifecycle ------------------------------------------------------------------------------
@@ -371,12 +374,35 @@ class Engine:
         log.info(rep.summary())
         return rep
 
+    # ---- model scorecard ---------------------------------------------------------------------------------
+    async def score_models(self, since_days: float = 30.0) -> dict[str, Any]:
+        """Pull settlement results for every market the models priced, re-score them, and store the
+        scorecard (Brier vs market, calibration, pessimistic P&L, caveats) for the dashboard and `bot status`."""
+        synced = await sync_results(self.storage, self.data_client)
+        rep = run_backtest(self.storage, since_days=since_days)
+        card = rep.to_dict()
+        card.update({"ts": time.time(), "synced_results": synced})
+        self.storage.set_state("last_backtest", card)
+        self._last_score = time.time()
+        log.info("model scorecard: %d scored, brier model=%s market=%s, %d candidates, pnl %sc (pessimistic), %d unresolved",
+                 rep.n_scored, f"{rep.brier_model:.4f}" if rep.brier_model is not None else "-",
+                 f"{rep.brier_market:.4f}" if rep.brier_market is not None else "-", rep.n_candidates, rep.pnl_cents, rep.unresolved)
+        return card
+
     # ---- loop ----------------------------------------------------------------------------------------
     async def run(self, once: bool = False) -> ScanReport:
         rep = await self.scan_once()
         if once:
             return rep
         while not self.stop.is_set():
+            if time.time() - self._last_score >= self.score_interval:
+                try:
+                    await self.score_models()
+                except UnexpectedApiResponse:
+                    raise
+                except Exception as e:  # scoring must never stop the scan loop
+                    log.error("model scoring failed: %s", e)
+                    self._last_score = time.time()
             if self.feed and self._feed_tickers:
                 if self._feed_task is None or self._feed_task.done():
                     self._feed_task = asyncio.create_task(self.feed.run(self._feed_tickers, self.stop, subscribe_fills=self.signer is not None))

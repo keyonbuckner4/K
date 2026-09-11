@@ -40,11 +40,29 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="ref
 <body><h1>kalshi-bot <span class="{cls}">{env}</span></h1>
 <form method="post" action="/halt"><button class="halt" type="submit">HALT ALL ORDER PLACEMENT</button></form>
 {halt_line}
+<h2>Model scorecard</h2>{scorecard}
 <h2>Risk state</h2><pre>{state}</pre>
 <h2>Equity</h2><pre>{equity}</pre>
 <h2>Recent decisions</h2><table><tr><th>time</th><th>strategy</th><th>stage</th><th>ok</th><th>market</th><th>side</th><th>price</th><th>edge net</th><th>reason</th></tr>{decisions}</table>
 <h2>Recent ladder gaps</h2><table><tr><th>time</th><th>event</th><th>kind</th><th>legs</th><th>gross</th><th>fees</th><th>net</th></tr>{gaps}</table>
 </body></html>"""
+
+
+def render_scorecard(card: dict[str, Any] | None) -> str:
+    if not card:
+        return "<p>No settlements scored yet. The bot re-scores every hour; the first weather settlements arrive the morning after a market's date.</p>"
+    bm, bmk = card.get("brier_model"), card.get("brier_market")
+    verdict = "no scored markets yet"
+    if bm is not None and bmk is not None:
+        verdict = ("model beats the market's own prices" if bm < bmk else "model does NOT beat the market's prices") + f" (Brier {bm:.4f} vs {bmk:.4f}, lower is better)"
+    cal = "".join(f"<tr><td>{c['bucket']}</td><td>{c['n']}</td><td>{c['mean_p']:.2f}</td><td>{c['realized']:.2f}</td></tr>" for c in card.get("calibration", []))
+    caveats = "".join(f"<li>{html.escape(str(c))}</li>" for c in card.get("caveats", []))
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(card.get("ts", 0)))) if card.get("ts") else "?"
+    return (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')}, unresolved: {card.get('unresolved')}, candidates: {card.get('n_candidates')}, "
+            f"pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
+            f"<p><b class='{'ok' if bm is not None and bmk is not None and bm < bmk else 'bad'}'>{html.escape(verdict)}</b></p>"
+            f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
+            f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
 
 
 def render(payload: dict[str, Any]) -> str:
@@ -57,8 +75,10 @@ def render(payload: dict[str, Any]) -> str:
                    f"<td>{g['n_legs']}</td><td>{g['gross_edge_cents']}</td><td>{g['fee_cents']}</td><td>{g['net_edge_cents']}</td></tr>" for g in payload["recent_gaps"])
     halted = payload["halt_file"]
     halt_line = "<p class='bad'>HALT file present: all order placement blocked. <form method='post' action='/resume-file' style='display:inline'><button type='submit'>remove HALT file</button></form></p>" if halted else "<p class='ok'>no HALT file</p>"
+    state = {k: v for k, v in payload["risk_state"].items() if k != "last_backtest"}
     return PAGE.format(env=payload["env"], cls="bad" if payload["env"] == "live" else "ok", halt_line=halt_line,
-                       state=html.escape(json.dumps(payload["risk_state"], indent=1, default=str)), equity=html.escape(json.dumps(payload["equity"], default=str)),
+                       scorecard=render_scorecard(payload["risk_state"].get("last_backtest")),
+                       state=html.escape(json.dumps(state, indent=1, default=str)), equity=html.escape(json.dumps(payload["equity"], default=str)),
                        decisions=rows, gaps=gaps)
 
 
