@@ -44,6 +44,10 @@ min_depth_multiple = 2
 min_minutes_to_settlement = 10
 
 [engine]
+# Where market data (events, books, series) is read from: "auto" reads production's public
+# endpoints while observing (demo books are nearly empty) and switches to the trading venue
+# under --trade; "demo" / "live" force it. Orders are always priced from the venue they go to.
+market_data = "auto"
 scan_interval_sec = 30
 series_cache_ttl_sec = 21600
 market_cache_ttl_sec = 20

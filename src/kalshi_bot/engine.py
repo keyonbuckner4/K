@@ -7,8 +7,11 @@ exist. Every scan refreshes the account, re-checks the loss limits, and logs eve
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -17,8 +20,8 @@ from .account import AccountSnapshot, AccountView
 from .alerts import Alerts
 from .auth import KalshiSigner
 from .client import KalshiClient
-from .config import Settings
-from .errors import ApiError, DataUnavailable, UnexpectedApiResponse
+from .config import LIVE, Settings
+from .errors import ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
 from .execution import OBSERVE, TRADE, Executor
 from .fees import FeeSchedule
 from .gate import GateConfig, check_intent
@@ -63,6 +66,19 @@ class ScanReport:
                 + (f", errors: {self.errors}" if self.errors else ""))
 
 
+_NUM = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def reason_histogram(decisions: list[dict[str, Any]], top: int = 12) -> list[tuple[str, int]]:
+    """Group logged decisions by strategy, stage and reason with numbers blanked out, most common first."""
+    c: Counter[str] = Counter()
+    for d in decisions:
+        reason = _NUM.sub("#", str(d.get("reason", "")))
+        reason = reason.split(" (")[0][:90]
+        c[f"{d.get('strategy')}/{d.get('stage')}: {reason}"] += 1
+    return c.most_common(top)
+
+
 class Engine:
     def __init__(self, settings: Settings, *, trade: bool = False, strategies: list[str] | None = None, transport: Any = None,
                  feeds: dict[str, Any] | None = None, use_ws: bool = True):
@@ -78,6 +94,32 @@ class Engine:
         self.limiter = SharedRateLimiter.from_config(cfg.get("ratelimit"))
         self.signer = KalshiSigner.from_pem_file(settings.api_key_id, settings.private_key_path) if settings.has_credentials else None
         self.client = KalshiClient(settings, self.limiter, self.signer, transport=transport)
+        # Market data may come from production's public endpoints while the account stays on demo.
+        # Demo books are nearly empty, so observe-only runs learn nothing from them. Orders are
+        # always priced from the venue they are sent to: trade mode forces data_env == env.
+        eng_cfg = cfg.get("engine", {})
+        requested = str(eng_cfg.get("market_data", "auto")).lower()
+        if requested not in ("auto", "demo", "live"):
+            raise ConfigError(f"[engine] market_data must be auto, demo or live, got {requested!r}")
+        if requested == "auto":
+            self.data_env = settings.env if trade else LIVE
+        else:
+            self.data_env = requested
+        if trade and self.data_env != settings.env:
+            raise ConfigError(f"[engine] market_data = {requested!r} cannot be combined with --trade on {settings.env}: "
+                              "orders must be priced from the venue they are sent to")
+        hosts = cfg.get("hosts", {}).get(self.data_env) or {}
+        if self.data_env != settings.env and requested == "auto" and not (hosts.get("rest") and hosts.get("ws")):
+            log.warning("[hosts.%s] missing from config/bot.toml; reading market data from %s instead", self.data_env, settings.env)
+            self.data_env = settings.env
+        if self.data_env == settings.env:
+            self.data_client = self.client
+        else:
+            if not hosts.get("rest") or not hosts.get("ws"):
+                raise ConfigError(f"config/bot.toml needs [hosts.{self.data_env}] to read market data from {self.data_env}")
+            data_settings = dataclasses.replace(settings, env=self.data_env, rest_base_url=str(hosts["rest"]).rstrip("/"), ws_url=str(hosts["ws"]),
+                                                api_key_id=None, private_key_path=None)
+            self.data_client = KalshiClient(data_settings, self.limiter, None, transport=transport)
         self.alerts = Alerts(settings.alert_webhook_url, str(cfg.get("alerts", {}).get("min_level", "warning")), settings.env)
         self.fee_sched = FeeSchedule.from_config(cfg.get("fees"))
         self.gate_cfg = GateConfig.from_toml(cfg.get("gate"))
@@ -95,7 +137,8 @@ class Engine:
         self.max_events = int(eng.get("max_events_per_series", 6))
         self._events_cache: dict[str, tuple[float, list[Event]]] = {}
         self._missing_series: set[str] = set()
-        self.feed: BookFeed | None = BookFeed(settings.ws_url, self.signer, on_fill=self._on_ws_fill) if use_ws else None
+        # The WebSocket needs a key for the venue it connects to; with production data on a demo key, poll REST instead.
+        self.feed: BookFeed | None = BookFeed(settings.ws_url, self.signer, on_fill=self._on_ws_fill) if (use_ws and self.data_client is self.client) else None
         self._feed_task: asyncio.Task | None = None
         self._feed_tickers: list[str] = []
         self.last_report: ScanReport | None = None
@@ -114,6 +157,7 @@ class Engine:
 
     async def startup(self) -> dict[str, Any]:
         info: dict[str, Any] = {"env": self.settings.env, "rest": self.settings.rest_base_url, "ws": self.settings.ws_url,
+                                "market_data_env": self.data_env, "market_data_rest": self.data_client.base_url,
                                 "trade_flag": self.trade_flag, "credentials": self.signer is not None,
                                 "strategies": {s.name: s.mode for s in self.strategies}, "db": str(self.settings.db_path)}
         status = await self.client.exchange_status()
@@ -141,6 +185,8 @@ class Engine:
                 pass
         await self.alerts.flush()
         await self.client.close()
+        if self.data_client is not self.client:
+            await self.data_client.close()
         await self.alerts.close()
         for s in self.strategies:
             closer = getattr(getattr(s, "nws", None), "close", None) or getattr(getattr(s, "feed", None), "close", None)
@@ -160,10 +206,10 @@ class Engine:
         cached = self.storage.cached_series(series, self.series_ttl)
         if cached is None:
             try:
-                s = await self.client.series(series)
+                s = await self.data_client.series(series)
             except ApiError as e:
                 if e.status == 404:
-                    log.error("series %s not found on Kalshi (check config tickers)", series)
+                    log.error("series %s not found on Kalshi %s (check config tickers)", series, self.data_env)
                     self._missing_series.add(series)
                     return False
                 raise
@@ -183,7 +229,7 @@ class Engine:
         if c and time.time() - c[0] < self.market_ttl:
             return c[1]
         try:
-            events = await self.client.events(series_ticker=series, status="open", with_nested_markets=True)
+            events = await self.data_client.events(series_ticker=series, status="open", with_nested_markets=True)
         except ApiError as e:
             if e.status == 404:
                 self._missing_series.add(series)
@@ -199,7 +245,7 @@ class Engine:
         if not events:
             seen = sorted({m.status for e in all_events for m in e.markets})
             log.warning("series %s: Kalshi %s returned %d events and none with open markets (market statuses seen: %s); nothing to scan",
-                        series, self.settings.env, total, seen)
+                        series, self.data_env, total, seen)
         else:
             log.info("series %s: %d open events, %d open markets (of %d events returned)", series, len(events), n_markets, total)
         self._events_cache[series] = (time.time(), events)
@@ -216,7 +262,7 @@ class Engine:
                 missing.append(t)
         if missing:
             try:
-                out.update(await self.client.orderbooks(missing))
+                out.update(await self.data_client.orderbooks(missing))
             except (ApiError, UnexpectedApiResponse) as e:
                 log.error("orderbook fetch failed for %d tickers: %s", len(missing), e)
         return out

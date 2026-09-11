@@ -179,3 +179,53 @@ def test_doctor_probes_hosts(tmp_path):
     assert out["configured"]["rest"] == "https://demo.test/trade-api/v2"
     assert out["probes"][0]["status_code"] == 200 and out["auth"]["ok"] and out["limits"]["tier"] == "basic"
     assert len(out["probes"]) == 3  # configured + the two known demo host families
+
+
+def test_observe_reads_production_data_while_account_stays_on_demo(tmp_path):
+    """Default market_data = auto: events/books come from the live host, balance/positions from demo."""
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    demo = FakeKalshi([], {}, SERIES)                 # demo carries no markets
+    live = FakeKalshi([ev], books, SERIES)            # production does
+    hosts = {}
+
+    def router(req: httpx.Request):
+        hosts.setdefault(req.url.host, set()).add(req.url.path)
+        return (live if req.url.host == "live.test" else demo).handler(req)
+
+    root = make_root(tmp_path)
+    toml = (root / "config" / "bot.toml").read_text() + "\n[hosts.live]\nrest = \"https://live.test/trade-api/v2\"\nws = \"wss://live.test/trade-api/ws/v2\"\n"
+    (root / "config" / "bot.toml").write_text(toml)
+    settings = load_settings(root, environ={})
+    nws = NWSClient("test", transport=httpx.MockTransport(nws_handler))
+    eng = Engine(settings, trade=False, transport=httpx.MockTransport(router), feeds={"nws": nws}, use_ws=True)
+    assert eng.data_env == "live" and eng.feed is None  # no live key -> REST polling for books
+
+    async def go():
+        with mock.patch("kalshi_bot.engine.datetime") as dt:
+            dt.now.return_value = fixed_now()
+            info = await eng.startup()
+            rep = await eng.run(once=True)
+        await eng.close()
+        return info, rep
+
+    info, rep = asyncio.run(go())
+    assert info["market_data_env"] == "live" and info["env"] == "demo"
+    assert rep.markets == 8 and rep.intents >= 1 and demo.orders == [] and live.orders == []
+    assert "/trade-api/v2/events" in hosts["live.test"] and "/trade-api/v2/portfolio/balance" in hosts["demo.test"]
+    assert not any("portfolio" in p for p in hosts["live.test"])  # never touches the live account
+
+
+def test_trade_mode_uses_the_trading_venue_for_data(tmp_path):
+    from kalshi_bot.errors import ConfigError
+
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    ex = FakeKalshi([ev], books, SERIES)
+    eng = build(tmp_path, ex, trade=True, arb_mode="trade")
+    assert eng.data_env == "demo" and eng.data_client is eng.client
+    asyncio.run(eng.close())
+    root = tmp_path
+    toml = (root / "config" / "bot.toml").read_text() + "\n[hosts.live]\nrest = \"https://live.test/trade-api/v2\"\nws = \"wss://live.test/trade-api/ws/v2\"\n"
+    (root / "config" / "bot.toml").write_text(toml.replace("[engine]", "[engine]\nmarket_data = \"live\""))
+    settings = load_settings(root, environ={})
+    with pytest.raises(ConfigError, match="cannot be combined with --trade"):
+        Engine(settings, trade=True, transport=httpx.MockTransport(ex.handler), use_ws=False)

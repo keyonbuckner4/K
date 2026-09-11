@@ -128,14 +128,30 @@ async def cmd_series(args, settings):
 
 
 async def cmd_scan(args, settings):
+    from .engine import reason_histogram
+
     eng = _engine(args, settings, trade=False)
     try:
         info = await eng.startup()
-        print("strategies:", info["strategies"], file=sys.stderr)
+        print(f"strategies: {info['strategies']} | market data from: {info['market_data_env']} | orders to: {info['env']} (observe-only)", file=sys.stderr)
         rep = await eng.run(once=True)
+        rows = eng.storage.decisions(since=rep.started, limit=100000)
         print(rep.summary())
+        print("\nwhy (most common first):")
+        for label, n in reason_histogram(rows):
+            print(f"  {n:6d}  {label}")
+        cands = [d for d in rows if d["accepted"] and d["stage"] in ("model", "ladder")]
+        if cands:
+            print("\ncandidates that cleared the model/ladder stage:")
+            for d in cands[:50]:
+                print(f"  {d['strategy']:<11} {d['market_ticker'] or d['event_ticker']:<32} {d['book_side'] or '':<4} @ {d['price'] or '-':<7} "
+                      f"x{d['count'] or '-':<4} net {d['edge_net_cents'] or '-':>7}c  {d['reason'][:70]}")
         if args.verbose:
-            _print([d for d in eng.storage.decisions(since=rep.started, limit=500)][::-1])
+            print("\nlast decisions (newest first):")
+            for d in rows[:200]:
+                print(f"  {d['strategy']:<11} {d['stage']:<8} {'ok ' if d['accepted'] else 'no '} {(d['market_ticker'] or d['event_ticker'] or ''):<32} "
+                      f"p={d['model_prob'] or '-':<8} {d['reason'][:80]}")
+        print(f"\n{len(rows)} decisions logged to {settings.db_path}. `bot decisions` and `bot gaps` list them; `bot run --dashboard` keeps scanning.")
     finally:
         await eng.close()
 
@@ -156,7 +172,7 @@ async def cmd_run(args, settings):
     try:
         info = await eng.startup()
         modes = {s.name: ("TRADE" if eng.can_trade and s.mode == "trade" else "observe") for s in eng.strategies}
-        print(f"running every {eng.scan_interval:.0f}s; modes: {modes}; Ctrl-C to stop", file=sys.stderr)
+        print(f"running every {eng.scan_interval:.0f}s; modes: {modes}; market data from {info['market_data_env']}; orders to {info['env']}; Ctrl-C to stop", file=sys.stderr)
         if args.dashboard:
             from .dashboard import Dashboard
 
@@ -258,7 +274,7 @@ async def cmd_backtest(args, settings):
     if not args.offline:
         eng = _engine(args, settings)
         try:
-            n = await sync_results(storage, eng.client)
+            n = await sync_results(storage, eng.data_client)
             print(f"synced {n} settlement results", file=sys.stderr)
         finally:
             await eng.close()

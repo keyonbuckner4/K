@@ -223,3 +223,17 @@ def test_event_merges_top_level_markets(tmp_path):
     c = make_client(tmp_path, handler)
     e = run(c.event("KXHIGHNY-26SEP10"))
     assert e.mutually_exclusive and len(e.markets) == 1 and e.series_ticker == "KXHIGHNY"
+
+
+def test_public_list_endpoints_work_without_a_signer(tmp_path):
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen["signed"] = "kalshi-access-signature" in req.headers
+        return httpx.Response(200, json={"events": [{"event_ticker": "A-1", "series_ticker": "A", "markets": []}], "cursor": None})
+
+    c = make_client(tmp_path, handler, signer=False)
+    evs = run(c.events(series_ticker="A"))
+    assert evs[0].event_ticker == "A-1" and seen["signed"] is False
+    with pytest.raises(ConfigError):
+        run(c.positions())  # private endpoints still need a key

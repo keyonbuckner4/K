@@ -132,11 +132,11 @@ class KalshiClient:
             raise ApiError(status, method, path, payload)
         raise ApiError(0, method, path, {"error": {"code": "retries_exhausted", "message": "unreachable"}})
 
-    async def _paginate(self, path: str, key: str, params: dict[str, Any], max_pages: int = 50) -> list[dict[str, Any]]:
+    async def _paginate(self, path: str, key: str, params: dict[str, Any], max_pages: int = 50, auth: bool = True) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(max_pages):
-            page = await self._request("GET", path, params={**params, "cursor": cursor})
+            page = await self._request("GET", path, params={**params, "cursor": cursor}, auth=auth)
             if not isinstance(page, Mapping) or key not in page:
                 raise UnexpectedApiResponse(f"{path} response without '{key}'", page)
             items = page.get(key) or []
@@ -165,7 +165,7 @@ class KalshiClient:
         params = {"series_ticker": series_ticker, "event_ticker": event_ticker, "status": status,
                   "tickers": ",".join(tickers) if tickers else None, "limit": limit,
                   "min_close_ts": min_close_ts, "max_close_ts": max_close_ts}
-        return [Market.parse(m) for m in await self._paginate("/markets", "markets", params, max_pages)]
+        return [Market.parse(m) for m in await self._paginate("/markets", "markets", params, max_pages, auth=self.signer is not None)]
 
     async def market(self, ticker: str) -> Market:
         data = await self._request("GET", f"/markets/{ticker}", auth=self.signer is not None)
@@ -177,7 +177,7 @@ class KalshiClient:
     async def events(self, *, series_ticker: str | None = None, status: str | None = "open", with_nested_markets: bool = True,
                      limit: int = 100, max_pages: int = 5) -> list[Event]:
         params = {"series_ticker": series_ticker, "status": status, "with_nested_markets": str(with_nested_markets).lower(), "limit": limit}
-        return [Event.parse(e) for e in await self._paginate("/events", "events", params, max_pages)]
+        return [Event.parse(e) for e in await self._paginate("/events", "events", params, max_pages, auth=self.signer is not None)]
 
     async def event(self, event_ticker: str, with_nested_markets: bool = True) -> Event:
         data = await self._request("GET", f"/events/{event_ticker}", params={"with_nested_markets": str(with_nested_markets).lower()},

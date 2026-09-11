@@ -59,3 +59,15 @@ def test_parser_has_every_command():
     assert {"balance", "doctor", "scan", "run", "halt", "resume", "backtest", "review", "dashboard", "watch", "flatten"} <= names
     args = p.parse_args(["run", "--trade", "--strategy", "ladder_arb", "--dashboard"])
     assert args.trade and args.strategy == ["ladder_arb"] and args.dashboard
+
+
+def test_reason_histogram_groups_numbers():
+    from kalshi_bot.engine import reason_histogram
+
+    rows = [{"strategy": "crypto", "stage": "model", "reason": "no two-sided book"},
+            {"strategy": "crypto", "stage": "model", "reason": "no two-sided book"},
+            {"strategy": "weather", "stage": "model", "reason": "best side bid: net edge -3.20c < 5c"},
+            {"strategy": "weather", "stage": "model", "reason": "best side ask: net edge 1.05c < 5c"}]
+    h = reason_histogram(rows)
+    assert h[0] == ("crypto/model: no two-sided book", 2)
+    assert ("weather/model: best side bid: net edge #c < #c", 1) in h
