@@ -51,16 +51,14 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="ref
 def render_scorecard(card: dict[str, Any] | None) -> str:
     if not card:
         return "<p>No settlements scored yet. The bot re-scores every hour; the first weather settlements arrive the morning after a market's date.</p>"
-    bm, bmk = card.get("brier_model"), card.get("brier_market")
-    verdict = "no scored markets yet"
-    if bm is not None and bmk is not None:
-        verdict = ("model beats the market's own prices" if bm < bmk else "model does NOT beat the market's prices") + f" (Brier {bm:.4f} vs {bmk:.4f}, lower is better)"
+    verdict = str(card.get("verdict") or "no scored markets yet")
+    good = verdict.startswith("model beats")
     cal = "".join(f"<tr><td>{c['bucket']}</td><td>{c['n']}</td><td>{c['mean_p']:.2f}</td><td>{c['realized']:.2f}</td></tr>" for c in card.get("calibration", []))
     caveats = "".join(f"<li>{html.escape(str(c))}</li>" for c in card.get("caveats", []))
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(card.get("ts", 0)))) if card.get("ts") else "?"
-    return (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')}, unresolved: {card.get('unresolved')}, candidates: {card.get('n_candidates')}, "
-            f"pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
-            f"<p><b class='{'ok' if bm is not None and bmk is not None and bm < bmk else 'bad'}'>{html.escape(verdict)}</b></p>"
+    return (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
+            f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
+            f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
             f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
             f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
 

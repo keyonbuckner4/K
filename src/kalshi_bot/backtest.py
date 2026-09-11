@@ -28,12 +28,22 @@ log = logging.getLogger(__name__)
 TICK = Decimal("0.01")
 
 
+MIN_CONTESTED = 20      # contested settlements needed before a verdict is offered
+CONTESTED_LO, CONTESTED_HI = 0.05, 0.95
+
+
 @dataclass
 class BacktestReport:
     since: float
     n_scored: int = 0
-    brier_model: float | None = None
-    brier_market: float | None = None
+    brier_model: float | None = None            # model, over every scored market
+    n_paired: int = 0                            # markets with both a model probability and a market price
+    brier_model_paired: float | None = None
+    brier_market: float | None = None           # market price as a probability, over the paired markets only
+    n_contested: int = 0                         # paired markets with a market price in [0.05, 0.95]
+    brier_model_contested: float | None = None
+    brier_market_contested: float | None = None
+    verdict: str = "insufficient evidence"
     calibration: list[dict[str, Any]] = field(default_factory=list)
     n_candidates: int = 0
     pnl_cents: Decimal = Decimal("0")
@@ -43,7 +53,10 @@ class BacktestReport:
     caveats: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"since": self.since, "n_scored": self.n_scored, "brier_model": self.brier_model, "brier_market": self.brier_market,
+        return {"since": self.since, "n_scored": self.n_scored, "brier_model": self.brier_model, "n_paired": self.n_paired,
+                "brier_model_paired": self.brier_model_paired, "brier_market": self.brier_market, "n_contested": self.n_contested,
+                "brier_model_contested": self.brier_model_contested, "brier_market_contested": self.brier_market_contested,
+                "verdict": self.verdict,
                 "calibration": self.calibration, "n_candidates": self.n_candidates, "pnl_cents": str(self.pnl_cents),
                 "pnl_by_strategy": {k: str(v) for k, v in self.pnl_by_strategy.items()}, "hit_rate": self.hit_rate,
                 "unresolved": self.unresolved, "caveats": self.caveats}
@@ -83,19 +96,34 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
     scored = [(r, 1.0 if y == "yes" else 0.0) for r, y in scored if y in ("yes", "no")]
     rep.n_scored = len(scored)
     if scored:
-        bm = bmk = 0.0
+        bm = 0.0
+        paired: list[tuple[float, float, float]] = []   # (model p, market p, outcome)
         buckets: dict[int, list[tuple[float, float]]] = {}
         for r, y in scored:
             p = float(r["model_prob"])
-            mkt = float(r["price"]) if r["price"] else None
             bm += (p - y) ** 2
-            if mkt is not None:
-                bmk += (mkt - y) ** 2
             buckets.setdefault(min(9, int(p * 10)), []).append((p, y))
+            if r["price"]:
+                paired.append((p, float(r["price"]), y))
         rep.brier_model = bm / len(scored)
-        rep.brier_market = bmk / len(scored)
         rep.calibration = [{"bucket": f"{b / 10:.1f}-{(b + 1) / 10:.1f}", "n": len(v), "mean_p": sum(p for p, _ in v) / len(v),
                             "realized": sum(y for _, y in v) / len(v)} for b, v in sorted(buckets.items())]
+        if paired:
+            rep.n_paired = len(paired)
+            rep.brier_model_paired = sum((p - y) ** 2 for p, _, y in paired) / len(paired)
+            rep.brier_market = sum((m - y) ** 2 for _, m, y in paired) / len(paired)
+        contested = [t for t in paired if CONTESTED_LO <= t[1] <= CONTESTED_HI]
+        if contested:
+            rep.n_contested = len(contested)
+            rep.brier_model_contested = sum((p - y) ** 2 for p, _, y in contested) / len(contested)
+            rep.brier_market_contested = sum((m - y) ** 2 for _, m, y in contested) / len(contested)
+        if rep.n_contested >= MIN_CONTESTED:
+            better = rep.brier_model_contested < rep.brier_market_contested
+            rep.verdict = (f"model {'beats' if better else 'does NOT beat'} the market's prices on {rep.n_contested} contested settlements "
+                           f"(Brier {rep.brier_model_contested:.4f} vs {rep.brier_market_contested:.4f}, lower is better)")
+        else:
+            rep.verdict = (f"insufficient evidence: {rep.n_contested} contested settlements scored, need {MIN_CONTESTED} "
+                           f"(markets priced between {int(CONTESTED_LO * 100)}c and {int(CONTESTED_HI * 100)}c; far-from-the-money markets prove nothing)")
 
     # pessimistic P&L on accepted model candidates
     cands = [r for r in rows if r["accepted"] == 1 and r["book_side"] in ("bid", "ask") and r["count"]]
@@ -138,6 +166,9 @@ def caveats(rep: BacktestReport) -> list[str]:
         "Fees are scored with the general 0.07 multiplier; series with maker fees or special multipliers differ.",
         "A positive P&L over a few days is consistent with pure luck; require Brier(model) < Brier(market) over hundreds of independent events before believing an edge.",
     ]
-    if rep.brier_model is not None and rep.brier_market is not None and rep.brier_model >= rep.brier_market:
-        out.insert(0, "The model's Brier score is NOT better than the market's own prices. Any positive P&L here is noise, not edge.")
+    if rep.n_contested >= MIN_CONTESTED and rep.brier_model_contested is not None and rep.brier_market_contested is not None \
+            and rep.brier_model_contested >= rep.brier_market_contested:
+        out.insert(0, "On contested markets the model's Brier score is NOT better than the market's own prices. Any positive P&L here is noise, not edge.")
+    elif rep.n_contested < MIN_CONTESTED:
+        out.insert(0, f"Only {rep.n_contested} contested settlements so far; no verdict on edge is possible yet. Near-certain markets scored right prove nothing.")
     return out

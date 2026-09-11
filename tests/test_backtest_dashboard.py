@@ -26,7 +26,8 @@ def test_backtest_scores_and_caveats(tmp_path):
     seed(s)
     rep = run_backtest(s, since_days=1)
     assert rep.n_scored == 4 and rep.unresolved == 1 and rep.n_candidates == 3
-    assert rep.brier_model is not None and rep.brier_model < rep.brier_market
+    assert rep.brier_model is not None and rep.brier_model_paired < rep.brier_market
+    assert rep.n_paired == 4 and rep.n_contested == 4 and rep.verdict.startswith("insufficient evidence")
     # X: bid 0.45 -> fill 0.46, settles yes: +0.54*5 - fee ; W: ask 0.60 -> fill 0.59, settles no: +0.59*5 - fee ; Z: bid 0.40 -> fill 0.41 settles no: -0.41*5 - fee
     assert rep.pnl_cents > 0 and rep.hit_rate == 2 / 3
     assert any("Sample" in c for c in rep.caveats) and len(rep.calibration) >= 2
@@ -34,12 +35,28 @@ def test_backtest_scores_and_caveats(tmp_path):
     assert rev["proposals"] and rev["per_strategy"]["weather"]["decisions"] == 5
 
 
-def test_backtest_flags_model_worse_than_market(tmp_path):
+def test_backtest_verdict_needs_contested_sample_and_ignores_missing_market_prices(tmp_path):
     s = Storage(tmp_path / "x.db")
-    s.log_decision("crypto", "model", True, "t", market_ticker="B-1", model_prob=Decimal("0.9"), price=Decimal("0.2"), book_side="bid", count=1)
-    s.save_market_result("B-1", "B", "no", time.time())
+    # 25 far-from-the-money markets with no market price: the model is trivially right; the market must not score
+    for i in range(25):
+        s.log_decision("crypto", "model", False, "no two-sided book", market_ticker=f"C-{i}", model_prob=Decimal("0.0"))
+        s.save_market_result(f"C-{i}", "C", "no", time.time())
     rep = run_backtest(s, since_days=1)
-    assert rep.caveats[0].startswith("The model's Brier score is NOT better")
+    assert rep.n_scored == 25 and rep.n_paired == 0 and rep.brier_market is None and rep.n_contested == 0
+    assert rep.verdict.startswith("insufficient evidence") and "Only 0 contested" in rep.caveats[0]
+    # 20 contested markets where the model is worse than the market -> a negative verdict
+    for i in range(20):
+        s.log_decision("crypto", "model", True, "t", market_ticker=f"B-{i}", model_prob=Decimal("0.9"), price=Decimal("0.2"), book_side="bid", count=1)
+        s.save_market_result(f"B-{i}", "B", "no", time.time())
+    rep = run_backtest(s, since_days=1)
+    assert rep.n_contested == 20 and rep.verdict.startswith("model does NOT beat")
+    assert rep.caveats[0].startswith("On contested markets the model's Brier score is NOT better")
+    # and a positive one when the model is right where the market was wrong
+    s2 = Storage(tmp_path / "y.db")
+    for i in range(20):
+        s2.log_decision("weather", "model", True, "t", market_ticker=f"W-{i}", model_prob=Decimal("0.8"), price=Decimal("0.3"), book_side="bid", count=1)
+        s2.save_market_result(f"W-{i}", "W", "yes", time.time())
+    assert run_backtest(s2, since_days=1).verdict.startswith("model beats")
 
 
 def test_dashboard_renders_and_halt_button_works(tmp_path):
@@ -74,13 +91,13 @@ def test_dashboard_renders_scorecard(tmp_path):
     from kalshi_bot.dashboard import render_scorecard
 
     assert "No settlements scored yet" in render_scorecard(None)
-    good = {"ts": time.time(), "n_scored": 12, "unresolved": 3, "n_candidates": 4, "pnl_cents": "35", "hit_rate": 0.75,
-            "brier_model": 0.18, "brier_market": 0.22, "calibration": [{"bucket": "0.6-0.7", "n": 5, "mean_p": 0.64, "realized": 0.6}],
-            "caveats": ["Sample: small"]}
+    good = {"ts": time.time(), "n_scored": 12, "n_contested": 12, "unresolved": 3, "n_candidates": 4, "pnl_cents": "35", "hit_rate": 0.75,
+            "verdict": "model beats the market's prices on 12 contested settlements (Brier 0.1800 vs 0.2200, lower is better)",
+            "calibration": [{"bucket": "0.6-0.7", "n": 5, "mean_p": 0.64, "realized": 0.6}], "caveats": ["Sample: small"]}
     html = render_scorecard(good)
-    assert "model beats the market" in html and "0.6-0.7" in html and "Sample: small" in html
-    bad = dict(good, brier_model=0.3)
-    assert "does NOT beat" in render_scorecard(bad)
+    assert "model beats the market" in html and "0.6-0.7" in html and "Sample: small" in html and "class='ok'" in html
+    bad = dict(good, verdict="model does NOT beat the market's prices on 12 contested settlements")
+    assert "does NOT beat" in render_scorecard(bad) and "class='bad'" in render_scorecard(bad)
     st = settings(tmp_path)
     s = Storage(st.db_path)
     s.set_state("last_backtest", good)

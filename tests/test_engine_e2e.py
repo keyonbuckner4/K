@@ -251,7 +251,8 @@ def test_engine_scores_models_against_settlements(tmp_path):
 
     card = asyncio.run(go())
     assert card["synced_results"] == 1 and card["n_scored"] == 1 and card["n_candidates"] == 1
-    assert card["brier_model"] < card["brier_market"]  # 0.7 vs market 0.40 on a YES settlement
+    assert card["brier_model_paired"] < card["brier_market"]  # 0.7 vs market 0.40 on a YES settlement
+    assert card["verdict"].startswith("insufficient evidence")
     from kalshi_bot.storage import Storage
     st = Storage(eng.settings.db_path)
     assert st.get_state("last_backtest")["n_scored"] == 1 and st.market_results(["KXHIGHNY-26SEP09-B76"]) == {"KXHIGHNY-26SEP09-B76": "yes"}
