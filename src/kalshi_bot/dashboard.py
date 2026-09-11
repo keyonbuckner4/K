@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -134,11 +135,16 @@ def make_handler(settings: Settings, storage: Storage, extra: Callable[[], dict[
             self.wfile.write(data)
 
         def do_GET(self):
-            payload = status_payload(settings, storage, extra)
-            if self.path.startswith("/api/status"):
-                self._send(200, json.dumps(payload, default=str), "application/json")
-            else:
-                self._send(200, render(payload))
+            # A rendering bug must show up as an error page, never as a dropped connection.
+            try:
+                payload = status_payload(settings, storage, extra)
+                if self.path.startswith("/api/status"):
+                    self._send(200, json.dumps(payload, default=str), "application/json")
+                else:
+                    self._send(200, render(payload))
+            except Exception:
+                log.exception("dashboard request %s failed", self.path)
+                self._send(500, f"<pre>dashboard error (the bot itself keeps running):\n{html.escape(traceback.format_exc())}</pre>")
 
         def do_POST(self):
             if self.path == "/halt":

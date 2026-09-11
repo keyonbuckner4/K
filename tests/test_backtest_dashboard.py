@@ -166,3 +166,29 @@ def test_dashboard_waits_for_a_busy_port_then_binds(tmp_path):
     finally:
         blocker.close()
         s.close()
+
+
+def test_dashboard_render_bug_becomes_an_error_page(tmp_path, monkeypatch):
+    from kalshi_bot import dashboard as dashboard_mod
+
+    st = settings(tmp_path)
+    s = Storage(st.db_path)
+
+    def broken(payload):
+        raise KeyError("mean_p")
+
+    monkeypatch.setattr(dashboard_mod, "render", broken)
+    d = Dashboard(st, s, "127.0.0.1", 0)
+    d.start()
+    try:
+        host, port = d.server.server_address[:2]
+        c = http.client.HTTPConnection(host, port, timeout=5)
+        c.request("GET", "/")
+        r = c.getresponse()
+        body = r.read().decode()
+        assert r.status == 500 and "dashboard error" in body and "KeyError" in body
+        c.request("GET", "/api/status")  # the JSON endpoint does not go through render() and still works
+        assert c.getresponse().status == 200
+    finally:
+        d.stop()
+        s.close()
