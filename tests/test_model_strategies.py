@@ -115,21 +115,42 @@ def test_weather_without_forecast_rejects_not_guesses(tmp_path):
 
 
 # ---- crypto -----------------------------------------------------------------------------------
+SEEN_KRAKEN = {}
+
+
 def kraken_handler(req: httpx.Request):
     if req.url.path == "/0/public/Ticker":
         return httpx.Response(200, json={"error": [], "result": {"XXBTZUSD": {"c": ["100000.0", "1.0"]}}})
     if req.url.path == "/0/public/OHLC":
-        closes = [100000 * (1 + 0.001 * ((i % 7) - 3)) for i in range(200)]
+        SEEN_KRAKEN["interval"] = int(req.url.params["interval"])
+        n = min(720, int(72 * 60 / SEEN_KRAKEN["interval"]))  # Kraken caps responses at 720 rows
+        closes = [100000 * (1 + 0.001 * ((i % 7) - 3)) for i in range(n)]
         return httpx.Response(200, json={"error": [], "result": {"XXBTZUSD": [[0, "0", "0", "0", str(c), "0", "0", 0] for c in closes], "last": 0}})
     return httpx.Response(404)
 
 
 def test_realized_vol_and_feed():
+    from kalshi_bot.data.crypto_feed import kraken_interval_for
+
     with pytest.raises(DataUnavailable):
         realized_vol_annualized([1.0] * 5, 1)
-    feed = CryptoFeed(transport=httpx.MockTransport(kraken_handler))
+    assert kraken_interval_for(72) == 15 and kraken_interval_for(12) == 1 and kraken_interval_for(24) == 5
+    feed = CryptoFeed(transport=httpx.MockTransport(kraken_handler), window_hours=72)
     q = asyncio.run(feed.quote("BTC"))
-    assert q.spot == 100000.0 and q.sigma_annual > 0 and "realized" in q.source
+    assert SEEN_KRAKEN["interval"] == 15  # 72h of 1-minute candles would exceed Kraken's 720-row cap
+    assert q.spot == 100000.0 and q.sigma_annual > 0 and q.source == "kraken_spot+realized_72h@15m"
+
+
+def test_realized_vol_refuses_a_truncated_window():
+    def short_handler(req: httpx.Request):
+        if req.url.path == "/0/public/Ticker":
+            return httpx.Response(200, json={"error": [], "result": {"XXBTZUSD": {"c": ["100000.0", "1.0"]}}})
+        closes = [100000 + i for i in range(40)]  # only 40 x 15m = 10h of a 72h window
+        return httpx.Response(200, json={"error": [], "result": {"XXBTZUSD": [[0, "0", "0", "0", str(c), "0", "0", 0] for c in closes], "last": 0}})
+
+    feed = CryptoFeed(transport=httpx.MockTransport(short_handler), window_hours=72)
+    with pytest.raises(DataUnavailable, match="under half"):
+        asyncio.run(feed.quote("BTC"))
 
 
 def test_crypto_strategy_prices_thresholds(tmp_path):

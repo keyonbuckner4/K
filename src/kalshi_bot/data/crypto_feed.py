@@ -23,6 +23,17 @@ KRAKEN = "https://api.kraken.com"
 DERIBIT = "https://www.deribit.com"
 PAIRS = {"BTC": "XBTUSD", "ETH": "ETHUSD"}
 MINUTES_PER_YEAR = 365 * 24 * 60
+KRAKEN_MAX_CANDLES = 720                      # Kraken returns at most 720 OHLC rows per request
+KRAKEN_INTERVALS = (1, 5, 15, 30, 60, 240, 1440, 10080, 21600)  # supported candle sizes in minutes
+
+
+def kraken_interval_for(window_hours: float) -> int:
+    """Smallest supported candle size that fits ``window_hours`` into one 720-row response."""
+    need = window_hours * 60 / KRAKEN_MAX_CANDLES
+    for iv in KRAKEN_INTERVALS:
+        if iv >= need:
+            return iv
+    return KRAKEN_INTERVALS[-1]
 
 
 def realized_vol_annualized(closes: list[float], interval_minutes: int) -> float:
@@ -77,9 +88,11 @@ class CryptoFeed:
         entry = next(iter(result.values()))
         return float(entry["c"][0])
 
-    async def kraken_realized_vol(self, asset: str) -> float:
+    async def kraken_realized_vol(self, asset: str) -> tuple[float, int, float]:
+        """Annualized realized vol over the configured window. Returns (sigma, candle_minutes, hours_covered)."""
+        interval = kraken_interval_for(self.window_hours)
         since = int(time.time()) - self.window_hours * 3600
-        data = await self._json(f"{KRAKEN}/0/public/OHLC", {"pair": PAIRS[asset], "interval": 1, "since": since})
+        data = await self._json(f"{KRAKEN}/0/public/OHLC", {"pair": PAIRS[asset], "interval": interval, "since": since})
         if data.get("error"):
             raise DataUnavailable(f"kraken ohlc error: {data['error']}")
         result = data.get("result") or {}
@@ -87,7 +100,10 @@ class CryptoFeed:
         if not candles:
             raise DataUnavailable("kraken ohlc without candles")
         closes = [float(c[4]) for c in candles]
-        return realized_vol_annualized(closes, 1)
+        hours = len(closes) * interval / 60
+        if hours < self.window_hours * 0.5:
+            raise DataUnavailable(f"kraken returned {len(closes)} x {interval}m candles ({hours:.1f}h), under half the {self.window_hours}h window")
+        return realized_vol_annualized(closes, interval), interval, hours
 
     async def deribit_dvol(self, asset: str) -> float:
         data = await self._json(f"{DERIBIT}/api/v2/public/get_index_price", {"index_name": f"{asset.lower()}dvol_usdc"})
@@ -107,7 +123,8 @@ class CryptoFeed:
         if self.vol_source == "deribit_dvol":
             sigma, src = await self.deribit_dvol(asset), "kraken_spot+deribit_dvol"
         else:
-            sigma, src = await self.kraken_realized_vol(asset), f"kraken_spot+realized_{self.window_hours}h"
+            sigma, interval, hours = await self.kraken_realized_vol(asset)
+            src = f"kraken_spot+realized_{hours:.0f}h@{interval}m"
         q = VolQuote(spot, sigma, src, time.time())
         self._cache[asset] = q
         return q
