@@ -196,15 +196,18 @@ class KalshiClient:
         return OrderBook.from_payload(ticker, data)
 
     async def orderbooks(self, tickers: list[str]) -> dict[str, OrderBook]:
-        """Bulk books via ``GET /markets/orderbooks`` (100 tickers max), per-ticker fallback on 404."""
+        """Bulk books via ``GET /markets/orderbooks``: up to 100 tickers as repeated ``tickers=``
+        query parameters (the spec's explode form). Falls back to per-ticker calls if the bulk
+        endpoint is missing or rejects the request."""
         out: dict[str, OrderBook] = {}
         for i in range(0, len(tickers), 100):
             chunk = tickers[i:i + 100]
             try:
-                data = await self._request("GET", "/markets/orderbooks", params={"tickers": ",".join(chunk)}, auth=self.signer is not None)
+                data = await self._request("GET", "/markets/orderbooks", params={"tickers": list(chunk)}, auth=self.signer is not None)
             except ApiError as e:
-                if e.status != 404:
+                if e.status not in (400, 404):
                     raise
+                log.warning("bulk orderbook endpoint returned %d; fetching %d books one by one", e.status, len(chunk))
                 for t in chunk:
                     out[t] = await self.orderbook(t)
                 continue

@@ -53,7 +53,7 @@ class FakeKalshi:
             evs = [e for e in self.events if not q.get("series_ticker") or e["series_ticker"] == q.get("series_ticker")]
             return httpx.Response(200, json={"events": evs, "cursor": None})
         if p.endswith("/markets/orderbooks"):
-            tickers = q.get("tickers", "").split(",")
+            tickers = [t for v in q.get_list("tickers") for t in v.split(",") if t]  # exploded form, comma form tolerated
             return httpx.Response(200, json={"orderbooks": [{"ticker": t, "orderbook_fp": self.books[t]} for t in tickers if t in self.books]})
         if p.endswith("/orderbook"):
             t = p.split("/")[-2]

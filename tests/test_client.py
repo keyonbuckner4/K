@@ -207,12 +207,28 @@ def test_auth_required_without_signer(tmp_path):
 def test_orderbook_and_bulk_fallback(tmp_path):
     def handler(req: httpx.Request):
         if req.url.path.endswith("/markets/orderbooks"):
-            return httpx.Response(404, json={"error": {"code": "not_found", "message": "no"}})
+            return httpx.Response(400, json={"msg": "Parameter validation failed for GetMarketOrderbooks"})
         return httpx.Response(200, json={"orderbook_fp": {"yes_dollars": [["0.40", "10"]], "no_dollars": [["0.55", "5"]]}})
 
     c = make_client(tmp_path, handler)
     books = run(c.orderbooks(["A", "B"]))
     assert set(books) == {"A", "B"} and books["A"].best_yes_ask == Decimal("0.45")
+
+
+def test_bulk_orderbooks_use_repeated_tickers_params(tmp_path):
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen["query"] = str(req.url.query, "utf-8")
+        seen["tickers"] = req.url.params.get_list("tickers")
+        return httpx.Response(200, json={"orderbooks": [
+            {"ticker": "A", "orderbook_fp": {"yes_dollars": [["0.40", "10"]], "no_dollars": [["0.55", "5"]]}},
+            {"ticker": "B", "orderbook_fp": {"yes_dollars": [], "no_dollars": []}}]})
+
+    c = make_client(tmp_path, handler)
+    books = run(c.orderbooks(["A", "B"]))
+    assert seen["tickers"] == ["A", "B"] and seen["query"] == "tickers=A&tickers=B"
+    assert books["A"].best_yes_ask == Decimal("0.45") and books["B"].best_yes_bid is None
 
 
 def test_event_merges_top_level_markets(tmp_path):

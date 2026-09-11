@@ -137,6 +137,7 @@ class Engine:
         self.max_events = int(eng.get("max_events_per_series", 6))
         self._events_cache: dict[str, tuple[float, list[Event]]] = {}
         self._missing_series: set[str] = set()
+        self._empty_warned: dict[str, float] = {}
         # The WebSocket needs a key for the venue it connects to; with production data on a demo key, poll REST instead.
         self.feed: BookFeed | None = BookFeed(settings.ws_url, self.signer, on_fill=self._on_ws_fill) if (use_ws and self.data_client is self.client) else None
         self._feed_task: asyncio.Task | None = None
@@ -244,8 +245,10 @@ class Engine:
         n_markets = sum(1 for e in events for m in e.markets if m.is_open())
         if not events:
             seen = sorted({m.status for e in all_events for m in e.markets})
-            log.warning("series %s: Kalshi %s returned %d events and none with open markets (market statuses seen: %s); nothing to scan",
-                        series, self.data_env, total, seen)
+            level = logging.WARNING if time.time() - self._empty_warned.get(series, 0) > 3600 else logging.DEBUG
+            self._empty_warned[series] = time.time() if level == logging.WARNING else self._empty_warned[series]
+            log.log(level, "series %s: Kalshi %s returned %d events and none with open markets (market statuses seen: %s); nothing to scan",
+                    series, self.data_env, total, seen)
         else:
             log.info("series %s: %d open events, %d open markets (of %d events returned)", series, len(events), n_markets, total)
         self._events_cache[series] = (time.time(), events)
