@@ -157,8 +157,11 @@ async def cmd_scan(args, settings):
 
 
 async def cmd_run(args, settings):
+    from .lock import InstanceLock
+
     if args.trade:
         settings.require_credentials()
+    lock = InstanceLock(settings.db_path.with_suffix(".lock")).acquire()
     eng = _engine(args, settings, trade=bool(args.trade), use_ws=not args.no_ws)
     if args.interval:
         eng.scan_interval = float(args.interval)
@@ -186,6 +189,7 @@ async def cmd_run(args, settings):
         if dash:
             dash.stop()
         await eng.close()
+        lock.release()
 
 
 async def cmd_watch(args, settings):

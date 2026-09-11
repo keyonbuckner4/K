@@ -6,6 +6,7 @@
 *.db-journal
 *.db-wal
 *.db-shm
+*.lock
 HALT
 __pycache__/
 .venv/
