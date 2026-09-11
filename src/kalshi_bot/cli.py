@@ -54,7 +54,7 @@ async def cmd_balance(args, settings):
     try:
         bal = await eng.client.balance()
         _print({"env": settings.env, "balance_dollars": f"{bal.balance_cents / 100:.2f}", "portfolio_value_dollars": f"{bal.portfolio_value_cents / 100:.2f}",
-                "equity_dollars": f"{bal.equity_cents / 100:.2f}", "updated": bal.updated})
+                "equity_dollars": f"{bal.equity_cents / 100:.2f}", "updated": bal.updated, "raw_response": bal.raw})
     finally:
         await eng.close()
 

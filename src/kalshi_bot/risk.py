@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 from .account import AccountSnapshot
 from .alerts import Alerts
@@ -100,12 +100,13 @@ class Approval:
 
 class RiskEngine:
     def __init__(self, storage: Storage, settings: Settings, alerts: Alerts | None = None, limits: RiskLimits = LIMITS,
-                 blocked_categories: tuple[str, ...] | None = None):
+                 blocked_categories: tuple[str, ...] | None = None, clock: Callable[[], datetime] = now_utc):
         self.storage = storage
         self.settings = settings
         self.alerts = alerts
         self.limits = limits
         self.blocked = tuple(c.lower() for c in (blocked_categories or limits.blocked_categories))
+        self.clock = clock
 
     # ---- persisted state -------------------------------------------------------------------
     def _get(self, key: str, default: Any = None) -> Any:
@@ -140,7 +141,7 @@ class RiskEngine:
     # ---- periodic health -----------------------------------------------------------------------
     def refresh(self, snapshot: AccountSnapshot, now: datetime | None = None) -> HealthReport:
         """Roll baselines, update the peak, and trip halts. Call on every scan, not just before orders."""
-        now = now or now_utc()
+        now = now or self.clock()
         equity = snapshot.equity_cents
         realized = snapshot.realized_cents
         dk, wk = day_key(now), week_key(now)
@@ -221,7 +222,7 @@ class RiskEngine:
     # ---- the chokepoint -----------------------------------------------------------------------
     def approve(self, intent: Intent, snapshot: AccountSnapshot, now: datetime | None = None) -> Approval:
         """Every order goes through here. Raises Halted or RiskRejected with the reason; never guesses."""
-        now = now or now_utc()
+        now = now or self.clock()
         notes: list[str] = []
 
         # 1. Kill switches. The HALT file is checked here and nowhere else.

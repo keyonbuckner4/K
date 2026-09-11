@@ -190,9 +190,18 @@ class Engine:
                 return []
             raise
         now = datetime.now(timezone.utc)
+        total = len(events)
+        all_events = events
         events = [e for e in events if any(m.is_open() for m in e.markets)]
         events.sort(key=lambda e: min((m.settle_time for m in e.markets if m.settle_time), default=now))
         events = events[: self.max_events]
+        n_markets = sum(1 for e in events for m in e.markets if m.is_open())
+        if not events:
+            seen = sorted({m.status for e in all_events for m in e.markets})
+            log.warning("series %s: Kalshi %s returned %d events and none with open markets (market statuses seen: %s); nothing to scan",
+                        series, self.settings.env, total, seen)
+        else:
+            log.info("series %s: %d open events, %d open markets (of %d events returned)", series, len(events), n_markets, total)
         self._events_cache[series] = (time.time(), events)
         return events
 
@@ -302,7 +311,7 @@ class Engine:
                                               event_ticker=intent.event_ticker, details=intent.to_dict())
                     rep.executed.append({"intent_id": intent.intent_id, "status": "no_credentials"})
                     continue
-                result = await self.executor_for(strat).execute(intent, snapshot)
+                result = await self.executor_for(strat).execute(intent, snapshot, now)
                 rep.executed.append({"intent_id": intent.intent_id, "status": result.status, "reason": result.reason, "strategy": strat.name})
                 if result.status in ("filled", "partial", "unwound"):
                     snapshot = await self.account.refresh(force=True)

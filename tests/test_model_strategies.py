@@ -69,7 +69,8 @@ def test_nws_failure_is_data_unavailable():
 
 def test_event_date_from_ticker_and_strike_date():
     assert event_date(Event.parse({"event_ticker": "KXHIGHNY-26SEP10"})) == "2026-09-10"
-    assert event_date(Event.parse({"event_ticker": "KXHIGHNY-26SEP10", "strike_date": "2026-09-11T04:00:00Z"})) == "2026-09-11"
+    assert event_date(Event.parse({"event_ticker": "KXHIGHNY-26SEP10", "strike_date": "2026-09-11T05:00:00Z"})) == "2026-09-10"  # ticker wins
+    assert event_date(Event.parse({"event_ticker": "KXWEIRD", "strike_date": "2026-09-11T02:00:00Z"})) == "2026-09-10"  # 10pm ET the day before
     assert event_date(Event.parse({"event_ticker": "KXWEIRD"})) is None
 
 

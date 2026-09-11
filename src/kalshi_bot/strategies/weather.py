@@ -19,6 +19,7 @@ from ..errors import DataUnavailable
 from ..intent import Intent
 from ..models import Event
 from ..pricing import prob_yes_normal, to_decimal_prob
+from ..risk import ET
 from .base import ScanContext, Strategy
 
 log = logging.getLogger(__name__)
@@ -27,13 +28,16 @@ _MONTHS = {m: i for i, m in enumerate(["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 
 
 def event_date(event: Event) -> str | None:
-    if event.strike_date is not None:
-        return event.strike_date.date().isoformat()
+    """Target date of a daily weather event. The ticker (KXHIGHNY-26SEP10) is authoritative:
+    Kalshi's strike_date on these events is a timestamp after the day ends, so it names the
+    wrong day in UTC. strike_date is only a fallback, taken in Eastern time."""
     m = _DATE.search(event.event_ticker)
-    if not m:
-        return None
-    yy, mon, dd = m.groups()
-    return f"20{yy}-{_MONTHS[mon]:02d}-{int(dd):02d}"
+    if m:
+        yy, mon, dd = m.groups()
+        return f"20{yy}-{_MONTHS[mon]:02d}-{int(dd):02d}"
+    if event.strike_date is not None:
+        return event.strike_date.astimezone(ET).date().isoformat()
+    return None
 
 
 class WeatherStrategy(Strategy):
