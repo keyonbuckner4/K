@@ -142,8 +142,11 @@ class Market:
         """Best estimate of when the market stops trading: close_time (trading halt) first."""
         return self.close_time or self.expected_expiration_time or self.expiration_time
 
+    OPEN_STATUSES = ("active", "open")
+
     def is_open(self) -> bool:
-        return self.status == "open"
+        """Kalshi labels tradeable markets ``active`` on market objects (the list filter is ``open``)."""
+        return self.status in self.OPEN_STATUSES
 
     @staticmethod
     def parse(d: Mapping[str, Any]) -> "Market":

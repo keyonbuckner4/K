@@ -39,6 +39,9 @@ def test_market_parse_fixed_point_and_times():
     assert m.floor_strike == Decimal("70") and m.cap_strike == Decimal("71")
     assert m.settle_time == m.close_time
     assert m.is_open()
+    assert models.Market.parse({"ticker": "A-1-X", "event_ticker": "A-1", "status": "active"}).is_open()
+    assert not models.Market.parse({"ticker": "A-1-X", "event_ticker": "A-1", "status": "closed"}).is_open()
+    assert not models.Market.parse({"ticker": "A-1-X", "event_ticker": "A-1"}).is_open()
 
 
 def test_market_requires_ticker():
