@@ -103,7 +103,9 @@ config/bot.toml                                                        # non-sec
 ## Running it unattended on Windows
 
 `scripts\install-windows-task.ps1` registers a Scheduled Task that starts `bot run --dashboard` at logon and
-restarts it a minute after any exit. Run it once from the repo folder. The bot holds a lock per environment so a
+restarts it a minute after any exit. Run it once from the repo folder
+(`powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-task.ps1` if scripts are disabled). Startup
+messages go to `data\logs\task.log`; per-scan lines go to `data\logs\bot.demo.log`. The bot holds a lock per environment so a
 second copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be
 on and logged in; for true 24/7 use a small always-on server (roadmap item 4).
 

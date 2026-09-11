@@ -21,14 +21,16 @@ $logDir = Join-Path $repo "data\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = Join-Path $logDir "task.log"
 
-$inner = "Set-Location '$repo'; & '$uv' run bot --quiet $BotArgs *>> '$logFile'"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -Command `"$inner`""
+# cmd.exe does the redirection so the bot's stderr status lines land in the log as plain text
+# (PowerShell would wrap them as NativeCommandError records).
+$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c cd /d `"$repo`" && `"$uv`" run bot --quiet $BotArgs >> `"$logFile`" 2>&1" -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "Task '$TaskName' registered and started: bot $BotArgs"
-Write-Host "Log:       $logFile"
+Write-Host "Startup log: $logFile"
+Write-Host "Scan log:    $(Join-Path $logDir 'bot.demo.log')   (Get-Content data\logs\bot.demo.log -Tail 5)"
 Write-Host "Dashboard: http://127.0.0.1:8787"
 Write-Host "Status:    Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"
