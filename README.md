@@ -123,6 +123,10 @@ on and logged in; for true 24/7 use a small always-on server (roadmap item 4).
    positions, using the existing reduce-only close path through the RiskEngine. Exit rules must compare the
    locked-in value after a second taker fee against the model's expected value of holding. Ships observe-first
    ("would sell" logged), then switched on in config, with tests.
-4. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
-5. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
+4. **Edge-threshold sweep (agreed).** After the observe period, score the logged decisions as if the gate's
+   minimum net edge had been 3c and 4c instead of 5c: trades per week and pessimistic P&L per threshold, from the
+   same settlements. The operator decides whether to lower `[gate] min_net_edge_cents` in BRIEF.md/config for
+   faster capital turnover. A trade quota is explicitly not on the table; frequency must come from edges.
+5. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
+6. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
    venue; set `strategies.weather.nws_user_agent` to a real contact.
