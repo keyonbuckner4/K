@@ -256,3 +256,88 @@ def test_engine_scores_models_against_settlements(tmp_path):
     from kalshi_bot.storage import Storage
     st = Storage(eng.settings.db_path)
     assert st.get_state("last_backtest")["n_scored"] == 1 and st.market_results(["KXHIGHNY-26SEP09-B76"]) == {"KXHIGHNY-26SEP09-B76": "yes"}
+
+
+def test_run_serves_the_dashboard_before_the_exchange_handshake(tmp_path, monkeypatch):
+    """`bot run --dashboard`: the status page answers while startup is still in progress (so a slow or
+    failing exchange never looks like a dead dashboard) and reports the bot's phase and last scan."""
+    import argparse
+    import http.client
+    import json
+
+    from kalshi_bot import cli, dashboard as dashboard_mod
+
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    ex = FakeKalshi([ev], books, SERIES)
+    eng = build(tmp_path, ex)
+    monkeypatch.setattr(cli, "_engine", lambda *a, **k: eng)
+    created = []
+
+    class Recording(dashboard_mod.Dashboard):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            created.append(self)
+
+    monkeypatch.setattr(dashboard_mod, "Dashboard", Recording)
+    gate = asyncio.Event()
+    real_startup = eng.startup
+
+    async def slow_startup():
+        await gate.wait()
+        return await real_startup()
+
+    eng.startup = slow_startup
+    args = argparse.Namespace(trade=False, no_ws=True, interval=None, dashboard=True, port=0, strategy=None)
+    seen = []
+
+    async def probe():
+        loop = asyncio.get_running_loop()
+        while not created:
+            await asyncio.sleep(0.01)
+        host, port = created[0].server.server_address[:2]
+
+        def get():
+            c = http.client.HTTPConnection(host, port, timeout=5)
+            c.request("GET", "/api/status")
+            return json.loads(c.getresponse().read())
+
+        first = await loop.run_in_executor(None, get)
+        seen.append(first["bot"])
+        gate.set()  # let startup proceed only after the page answered
+        for _ in range(400):
+            if eng.last_report:
+                break
+            await asyncio.sleep(0.025)
+        seen.append((await loop.run_in_executor(None, get))["bot"])
+        eng.stop.set()
+
+    async def go():
+        with mock.patch("kalshi_bot.engine.datetime") as dt:
+            dt.now.return_value = fixed_now()
+            await asyncio.gather(cli.cmd_run(args, eng.settings), probe())
+
+    asyncio.run(go())
+    assert seen[0]["phase"].startswith("starting") and seen[0]["last_scan_ts"] is None and seen[0]["pid"]
+    assert seen[1]["phase"] == "running" and seen[1]["last_scan_ts"] and seen[1]["modes"] == {"ladder_arb": "observe", "weather": "observe"}
+    assert seen[1]["market_data_env"] == "demo" and seen[1]["orders_env"] == "demo"
+    assert ex.orders == []
+
+
+def test_run_logs_a_failed_startup(tmp_path, monkeypatch, caplog):
+    import argparse
+
+    from kalshi_bot import cli
+    from kalshi_bot.errors import ApiError
+
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    eng = build(tmp_path, FakeKalshi([ev], books, SERIES))
+    monkeypatch.setattr(cli, "_engine", lambda *a, **k: eng)
+
+    async def broken_startup():
+        raise ApiError(503, "GET", "/exchange/status", {"message": "exchange unreachable"})
+
+    eng.startup = broken_startup
+    args = argparse.Namespace(trade=False, no_ws=True, interval=None, dashboard=False, port=None, strategy=None)
+    with pytest.raises(ApiError):
+        asyncio.run(cli.cmd_run(args, eng.settings))
+    assert "startup failed: ApiError:" in caplog.text and "exchange unreachable" in caplog.text

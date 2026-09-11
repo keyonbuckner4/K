@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -166,6 +167,10 @@ async def cmd_run(args, settings):
     if args.interval:
         eng.scan_interval = float(args.interval)
     dash = None
+    # Process-level status for the dashboard: the page is served from the moment the lock is held, so an
+    # operator can see "connecting to the exchange" or "startup failed" instead of a refused connection.
+    bot_status: dict[str, Any] = {"pid": os.getpid(), "process_started": time.time(), "phase": "starting: connecting to the exchange",
+                                  "scan_interval_sec": eng.scan_interval, "trade_flag": bool(args.trade), "error": None}
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -173,18 +178,30 @@ async def cmd_run(args, settings):
         except (NotImplementedError, RuntimeError):
             pass
     try:
-        info = await eng.startup()
-        modes = {s.name: ("TRADE" if eng.can_trade and s.mode == "trade" else "observe") for s in eng.strategies}
-        print(f"running every {eng.scan_interval:.0f}s; modes: {modes}; market data from {info['market_data_env']}; orders to {info['env']}; Ctrl-C to stop", file=sys.stderr)
         if args.dashboard:
             from .dashboard import Dashboard
 
             dcfg = settings.toml.get("dashboard", {})
             dash = Dashboard(settings, eng.storage, str(dcfg.get("host", "127.0.0.1")), int(args.port or dcfg.get("port", 8787)),
-                             extra=lambda: {"last_scan": eng.last_report.summary() if eng.last_report else None, "limiter": eng.limiter.describe()})
+                             extra=lambda: {"bot": dict(bot_status, last_scan_ts=eng.last_report.finished if eng.last_report else None),
+                                            "last_scan": eng.last_report.summary() if eng.last_report else None, "limiter": eng.limiter.describe()})
             dash.start()
             print(f"dashboard: {dash.url}", file=sys.stderr)
+        try:
+            info = await eng.startup()
+        except Exception as e:
+            bot_status.update(phase="startup failed", error=f"{type(e).__name__}: {e}")
+            log.error("startup failed: %s: %s", type(e).__name__, e)
+            raise
+        modes = {s.name: ("TRADE" if eng.can_trade and s.mode == "trade" else "observe") for s in eng.strategies}
+        bot_status.update(phase="running", started=time.time(), modes=modes, market_data_env=info["market_data_env"], orders_env=info["env"])
+        print(f"running every {eng.scan_interval:.0f}s; modes: {modes}; market data from {info['market_data_env']}; orders to {info['env']}; Ctrl-C to stop", file=sys.stderr)
         await eng.run(once=False)
+        bot_status.update(phase="stopped")
+    except BaseException as e:
+        if bot_status["phase"] != "startup failed":
+            bot_status.update(phase="stopped on error", error=f"{type(e).__name__}: {e}")
+        raise
     finally:
         if dash:
             dash.stop()
@@ -476,6 +493,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     setup_logging(settings.root, settings.env, args.log_level, quiet=args.quiet or args.cmd in ("halt", "resume", "status", "gaps", "decisions", "setup"))
     _banner(settings)
+    # Every exit reason is also written to the file log: an unattended run (Windows task, systemd) has no console,
+    # so stderr alone would leave "why did it stop?" unanswerable.
     try:
         if args.cmd in SYNC_COMMANDS:
             SYNC_COMMANDS[args.cmd](args, settings)
@@ -483,13 +502,20 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(COMMANDS[args.cmd](args, settings))
         return 0
     except UnexpectedApiResponse as e:
+        log.critical("exit 3 (%s): undocumented API response: %s", args.cmd, e)
         print(f"STOP: the API returned something the docs don't describe. Not guessing.\n{e}", file=sys.stderr)
         return 3
     except BotError as e:
+        log.error("exit 1 (%s): %s", args.cmd, e)
         print(f"error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        log.info("exit 130 (%s): interrupted", args.cmd)
         return 130
+    except Exception as e:
+        log.exception("exit 1 (%s): crashed: %s: %s", args.cmd, type(e).__name__, e)
+        print(f"crashed: {type(e).__name__}: {e} (traceback in the log file)", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@
 #     .\scripts\install-windows-task.ps1
 # Trade mode (only after the observe gate in BRIEF.md is met):
 #     .\scripts\install-windows-task.ps1 -BotArgs "run --dashboard --trade"
+# Update + restart (after this, the normal way to pick up new code):
+#     .\scripts\restart-windows-task.ps1 -Pull
 # Stop / remove:
 #     Stop-ScheduledTask -TaskName kalshi-bot
 #     Unregister-ScheduledTask -TaskName kalshi-bot -Confirm:$false
@@ -32,6 +34,6 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Se
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "Task '$TaskName' registered and started: bot $BotArgs"
 Write-Host "Scan log:  $(Join-Path $logDir 'bot.demo.log')   (Get-Content data\logs\bot.demo.log -Tail 5)"
-Write-Host "Restart after git pull:  Stop-ScheduledTask -TaskName $TaskName; Start-ScheduledTask -TaskName $TaskName"
+Write-Host "Update and restart:  .\scripts\restart-windows-task.ps1 -Pull   (restart only: without -Pull)"
 Write-Host "Dashboard: http://127.0.0.1:8787"
 Write-Host "Status:    Get-ScheduledTask -TaskName $TaskName | Get-ScheduledTaskInfo"

@@ -104,13 +104,23 @@ config/bot.toml                                                        # non-sec
 
 `scripts\install-windows-task.ps1` registers a Scheduled Task that starts `bot run --dashboard` at logon and
 restarts it a minute after any exit. Run it once from the repo folder
-(`powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-task.ps1` if scripts are disabled). The task runs
-the bot's own interpreter, so `Stop-ScheduledTask -TaskName kalshi-bot; Start-ScheduledTask -TaskName kalshi-bot`
-restarts it cleanly after a `git pull`. Logs: `data\logs\bot.demo.log`. If an older copy is still running (the
-dashboard shows stale content, or the log says "another bot run is already active"), stop it with:
-`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*kalshi-bot*' -and $_.Name -in 'python.exe','uv.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }` The bot holds a lock per environment so a
-second copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be
-on and logged in; for true 24/7 use a small always-on server (roadmap item 4).
+(`powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-task.ps1` if scripts are disabled).
+
+To pick up new code, or to restart for any reason, use the restart script rather than stopping and starting the
+task by hand: `.\scripts\restart-windows-task.ps1 -Pull` (pull + `uv sync` + restart; drop `-Pull` to restart only).
+A hand-typed `Stop-ScheduledTask; Start-ScheduledTask` can race: if the old process is still shutting down the
+task ignores the start and nothing runs. The script waits for the old process to be gone, kills any leftover from
+an older install, starts the task, waits until the dashboard answers, and prints the task state, the bot's phase
+and the last log lines.
+
+The dashboard (http://127.0.0.1:8787) is served from the moment the process holds its lock, before the exchange
+handshake, and its first line is the bot's own status: `starting`, `running` with the time of the last scan, or
+`startup failed` with the error. "Connection refused" therefore means no bot process is running: check
+`(Get-ScheduledTask -TaskName kalshi-bot).State` and run the restart script. Every exit reason (config error,
+undocumented API response, crash with traceback) is written to `data\logs\bot.demo.log`, so
+`Get-Content data\logs\bot.demo.log -Tail 20` explains any stop. The bot holds a lock per environment so a second
+copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be on and
+logged in; for true 24/7 use a small always-on server (roadmap item 5).
 
 ## Roadmap (agreed with the operator)
 

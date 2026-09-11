@@ -3,6 +3,8 @@ import json
 import time
 from decimal import Decimal
 
+import pytest
+
 from kalshi_bot.backtest import run_backtest
 from kalshi_bot.dashboard import Dashboard, render, status_payload
 from kalshi_bot.review import weekly_review
@@ -122,3 +124,45 @@ def test_activity_stats_counts_distinct_positions_per_day(tmp_path):
     a = activity_stats(s, days=7, now=now)
     assert a["distinct_positions"] == 3 and a["by_strategy"] == {"weather": 2, "crypto": 1}
     assert a["days_observed"] >= 0.04 and a["trades_per_day"] > 0  # rounded to 2 decimals; one hour is 0.0417 days
+
+
+def test_dashboard_bot_status_line(tmp_path):
+    st = settings(tmp_path)
+    s = Storage(st.db_path)
+    page = render(status_payload(st, s))
+    assert "no bot process is attached" in page
+    bot = {"pid": 42, "process_started": time.time() - 100, "phase": "running", "scan_interval_sec": 30, "modes": {"weather": "observe"},
+           "market_data_env": "live", "orders_env": "demo", "last_scan_ts": time.time() - 12, "error": None}
+    page = render(status_payload(st, s, extra=lambda: {"bot": bot, "last_scan": "scan 1.0s: 2 strategies"}))
+    assert "class='ok'>running" in page and "pid 42" in page and "scan 1.0s: 2 strategies" in page
+    assert "market data from live, orders to demo" in page and "scans every 30s" in page
+    starting = dict(bot, phase="starting: connecting to the exchange", last_scan_ts=None, modes=None, market_data_env=None)
+    page = render(status_payload(st, s, extra=lambda: {"bot": starting}))
+    assert "class='bad'>starting: connecting to the exchange" in page and "last scan" not in page
+    failed = dict(bot, phase="startup failed", error="ApiError: 503 service unavailable", last_scan_ts=None)
+    page = render(status_payload(st, s, extra=lambda: {"bot": failed}))
+    assert "class='bad'>startup failed" in page and "ApiError: 503 service unavailable" in page
+    s.close()
+
+
+def test_dashboard_waits_for_a_busy_port_then_binds(tmp_path):
+    import socket
+    import threading
+
+    st = settings(tmp_path)
+    s = Storage(st.db_path)
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        with pytest.raises(OSError):
+            Dashboard(st, s, "127.0.0.1", port, bind_timeout=0)  # no patience: the busy port is an error
+        threading.Timer(0.6, blocker.close).start()
+        t0 = time.monotonic()
+        d = Dashboard(st, s, "127.0.0.1", port, bind_timeout=10)  # the old process lets go: bind succeeds on retry
+        assert d.server.server_address[1] == port and time.monotonic() - t0 >= 0.5
+        d.server.server_close()
+    finally:
+        blocker.close()
+        s.close()

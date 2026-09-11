@@ -71,3 +71,32 @@ def test_reason_histogram_groups_numbers():
     h = reason_histogram(rows)
     assert h[0] == ("crypto/model: no two-sided book", 2)
     assert ("weather/model: best side bid: net edge #c < #c", 1) in h
+
+
+def test_main_writes_every_exit_reason_to_the_log_file(tmp_path, monkeypatch):
+    """An unattended run has no console: a crash, a BotError or an undocumented API response must be
+    explained in data/logs/bot.demo.log, not only on stderr."""
+    from kalshi_bot.errors import ConfigError, UnexpectedApiResponse
+
+    root = make_root(tmp_path)
+    log_file = root / "data" / "logs" / "bot.demo.log"
+
+    async def crash(args, settings):
+        raise RuntimeError("kaboom")
+
+    async def config(args, settings):
+        raise ConfigError("bad config")
+
+    async def undocumented(args, settings):
+        raise UnexpectedApiResponse("weird shape")
+
+    monkeypatch.setitem(cli.COMMANDS, "status", crash)
+    assert cli.main(["--root", str(root), "--quiet", "status"]) == 1
+    text = log_file.read_text()
+    assert "exit 1 (status): crashed: RuntimeError: kaboom" in text and "Traceback" in text
+    monkeypatch.setitem(cli.COMMANDS, "status", config)
+    assert cli.main(["--root", str(root), "--quiet", "status"]) == 1
+    assert "exit 1 (status): bad config" in log_file.read_text()
+    monkeypatch.setitem(cli.COMMANDS, "status", undocumented)
+    assert cli.main(["--root", str(root), "--quiet", "status"]) == 3
+    assert "exit 3 (status): undocumented API response: weird shape" in log_file.read_text()

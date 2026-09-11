@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import html
 import json
 import logging
@@ -40,6 +41,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="ref
 <body><h1>kalshi-bot <span class="{cls}">{env}</span></h1>
 <form method="post" action="/halt"><button class="halt" type="submit">HALT ALL ORDER PLACEMENT</button></form>
 {halt_line}
+{bot_line}
 <h2>Model scorecard</h2>{scorecard}
 <h2>Risk state</h2><pre>{state}</pre>
 <h2>Equity</h2><pre>{equity}</pre>
@@ -69,6 +71,38 @@ def render_scorecard(card: dict[str, Any] | None) -> str:
             f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
 
 
+def _fmt_ts(ts: Any) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def render_bot_line(payload: dict[str, Any]) -> str:
+    """One line on the bot process itself: phase, age, last scan. Absent for `bot dashboard` (no engine)."""
+    bot = payload.get("bot")
+    if not bot:
+        return "<p>Status page only: no bot process is attached (started with `bot dashboard`, or the run has not published its status).</p>"
+    phase = str(bot.get("phase", "?"))
+    cls = "ok" if phase == "running" else "bad"
+    parts = [f"<b class='{cls}'>{html.escape(phase)}</b>", f"pid {bot.get('pid')}", f"process started {_fmt_ts(bot.get('process_started'))}"]
+    if bot.get("error"):
+        parts.append(f"error: {html.escape(str(bot['error']))}")
+    if bot.get("modes"):
+        parts.append("modes " + html.escape(json.dumps(bot["modes"])))
+    if bot.get("market_data_env"):
+        parts.append(f"market data from {html.escape(str(bot['market_data_env']))}, orders to {html.escape(str(bot.get('orders_env')))}")
+    last = bot.get("last_scan_ts")
+    if last:
+        age = max(0.0, float(payload.get("time", time.time())) - float(last))
+        parts.append(f"last scan {_fmt_ts(last)} ({age:.0f}s ago; scans every {float(bot.get('scan_interval_sec', 0)):.0f}s)")
+        if payload.get("last_scan"):
+            parts.append(html.escape(str(payload["last_scan"])))
+    elif phase == "running":
+        parts.append("first scan in progress")
+    return "<p>Bot: " + " | ".join(parts) + "</p>"
+
+
 def render(payload: dict[str, Any]) -> str:
     rows = "".join(
         f"<tr><td>{time.strftime('%H:%M:%S', time.localtime(d['ts']))}</td><td>{html.escape(d['strategy'])}</td><td>{d['stage']}</td>"
@@ -80,7 +114,7 @@ def render(payload: dict[str, Any]) -> str:
     halted = payload["halt_file"]
     halt_line = "<p class='bad'>HALT file present: all order placement blocked. <form method='post' action='/resume-file' style='display:inline'><button type='submit'>remove HALT file</button></form></p>" if halted else "<p class='ok'>no HALT file</p>"
     state = {k: v for k, v in payload["risk_state"].items() if k != "last_backtest"}
-    return PAGE.format(env=payload["env"], cls="bad" if payload["env"] == "live" else "ok", halt_line=halt_line,
+    return PAGE.format(env=payload["env"], cls="bad" if payload["env"] == "live" else "ok", halt_line=halt_line, bot_line=render_bot_line(payload),
                        scorecard=render_scorecard(payload["risk_state"].get("last_backtest")),
                        state=html.escape(json.dumps(state, indent=1, default=str)), equity=html.escape(json.dumps(payload["equity"], default=str)),
                        decisions=rows, gaps=gaps)
@@ -121,8 +155,20 @@ def make_handler(settings: Settings, storage: Storage, extra: Callable[[], dict[
 
 
 class Dashboard:
-    def __init__(self, settings: Settings, storage: Storage, host: str = "127.0.0.1", port: int = 8787, extra: Callable[[], dict[str, Any]] | None = None):
-        self.server = ThreadingHTTPServer((host, port), make_handler(settings, storage, extra))
+    def __init__(self, settings: Settings, storage: Storage, host: str = "127.0.0.1", port: int = 8787, extra: Callable[[], dict[str, Any]] | None = None,
+                 bind_timeout: float = 20.0):
+        handler = make_handler(settings, storage, extra)
+        deadline = time.monotonic() + bind_timeout
+        while True:
+            try:
+                self.server = ThreadingHTTPServer((host, port), handler)
+                break
+            except OSError as e:
+                # A restart can race the previous process releasing the port; wait for it rather than crashing.
+                if e.errno not in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", 10048)) or time.monotonic() >= deadline:
+                    raise
+                log.warning("dashboard port %s:%s busy (%s); retrying", host, port, e)
+                time.sleep(1.0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     @property
