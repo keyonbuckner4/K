@@ -56,7 +56,13 @@ def render_scorecard(card: dict[str, Any] | None) -> str:
     cal = "".join(f"<tr><td>{c['bucket']}</td><td>{c['n']}</td><td>{c['mean_p']:.2f}</td><td>{c['realized']:.2f}</td></tr>" for c in card.get("calibration", []))
     caveats = "".join(f"<li>{html.escape(str(c))}</li>" for c in card.get("caveats", []))
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(card.get("ts", 0)))) if card.get("ts") else "?"
-    return (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
+    act = card.get("activity") or {}
+    activity = ""
+    if act:
+        by = ", ".join(f"{k}: {v}" for k, v in (act.get("by_strategy") or {}).items()) or "none"
+        activity = (f"<p>Trade rate: {act.get('distinct_positions', 0)} distinct positions would have traded over {act.get('days_observed', 0)} days, "
+                    f"about {act.get('trades_per_day', 0)} per day or {act.get('trades_per_week', 0)} per week ({by}).</p>")
+    return (activity + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
             f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
             f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
             f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"

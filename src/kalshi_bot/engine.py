@@ -19,7 +19,7 @@ from typing import Any
 from .account import AccountSnapshot, AccountView
 from .alerts import Alerts
 from .auth import KalshiSigner
-from .backtest import run_backtest, sync_results
+from .backtest import activity_stats, run_backtest, sync_results
 from .client import KalshiClient
 from .config import LIVE, Settings
 from .errors import ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
@@ -381,7 +381,7 @@ class Engine:
         synced = await sync_results(self.storage, self.data_client)
         rep = run_backtest(self.storage, since_days=since_days)
         card = rep.to_dict()
-        card.update({"ts": time.time(), "synced_results": synced})
+        card.update({"ts": time.time(), "synced_results": synced, "activity": activity_stats(self.storage, 7.0)})
         self.storage.set_state("last_backtest", card)
         self._last_score = time.time()
         log.info("model scorecard: %d scored, brier model=%s market=%s, %d candidates, pnl %sc (pessimistic), %d unresolved",

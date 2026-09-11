@@ -156,6 +156,25 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
     return rep
 
 
+def activity_stats(storage: Storage, days: float = 7.0, now: float | None = None) -> dict[str, Any]:
+    """How often the bot would have traded: distinct market/day pairs that reached the execute stage
+    (observed, or filled in trade mode), per day and per week, over the window actually covered."""
+    now = time.time() if now is None else now
+    since = now - days * 86400
+    rows = [r for r in storage.decisions(since=since, limit=100000) if r["stage"] == "execute" and r["accepted"]]
+    if not rows:
+        return {"window_days": days, "days_observed": 0.0, "trades_per_day": 0.0, "trades_per_week": 0.0, "distinct_positions": 0, "by_strategy": {}}
+    first = min(r["ts"] for r in rows)
+    covered = max(1 / 24, (now - first) / 86400)  # at least an hour, never divide by zero
+    pairs = {(r["market_ticker"], time.strftime("%Y-%m-%d", time.gmtime(r["ts"]))) for r in rows}
+    by: dict[str, set] = {}
+    for r in rows:
+        by.setdefault(r["strategy"], set()).add((r["market_ticker"], time.strftime("%Y-%m-%d", time.gmtime(r["ts"]))))
+    per_day = len(pairs) / covered
+    return {"window_days": days, "days_observed": round(covered, 2), "distinct_positions": len(pairs), "trades_per_day": round(per_day, 1),
+            "trades_per_week": round(per_day * 7, 1), "by_strategy": {k: len(v) for k, v in by.items()}}
+
+
 def caveats(rep: BacktestReport) -> list[str]:
     out = [
         f"Sample: {rep.n_scored} scored markets, {rep.n_candidates} candidates, {rep.unresolved} unresolved. Buckets of one event settle together, so the effective sample is closer to the number of events than of markets.",

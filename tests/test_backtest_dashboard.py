@@ -104,3 +104,21 @@ def test_dashboard_renders_scorecard(tmp_path):
     page = render(status_payload(st, s))
     assert "Model scorecard" in page and "model beats the market" in page and "last_backtest" not in page.split("Risk state")[1].split("Equity")[0]
     s.close()
+
+
+def test_activity_stats_counts_distinct_positions_per_day(tmp_path):
+    from kalshi_bot.backtest import activity_stats
+
+    import calendar
+
+    s = Storage(tmp_path / "x.db")
+    assert activity_stats(s)["trades_per_week"] == 0.0
+    now = calendar.timegm((2026, 9, 10, 12, 0, 0))  # fixed noon UTC so the hour never crosses a day boundary
+    for i in range(6):  # the same two markets observed every scan for an hour count once each
+        s.log_decision("weather", "execute", True, "OBSERVE mode: order not sent", market_ticker="A-1-X", ts=now - 3600 + i * 600)
+        s.log_decision("weather", "execute", True, "OBSERVE mode: order not sent", market_ticker="A-1-Y", ts=now - 3600 + i * 600)
+    s.log_decision("crypto", "execute", True, "filled: all legs filled", market_ticker="B-1", ts=now - 1800)
+    s.log_decision("crypto", "risk", False, "risk rejected", market_ticker="B-2", ts=now - 1800)  # not an execution
+    a = activity_stats(s, days=7, now=now)
+    assert a["distinct_positions"] == 3 and a["by_strategy"] == {"weather": 2, "crypto": 1}
+    assert a["days_observed"] >= 0.04 and a["trades_per_day"] > 0  # rounded to 2 decimals; one hour is 0.0417 days
