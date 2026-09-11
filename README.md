@@ -99,3 +99,18 @@ src/kalshi_bot/
 tests/                                                                 # offline, no network
 config/bot.toml                                                        # non-secret config
 ```
+
+## Roadmap (agreed with the operator)
+
+1. **Observe period, in progress.** `bot run --dashboard` started on demo on 2026-09-11 00:53 UTC with all
+   strategies in `observe`, reading production market data. Gates from the BRIEF: 48 h of ladder-gap logs
+   before `ladder_arb` may trade, 24 h of weather decisions before `weather` may.
+2. **Backtest review.** After the first settlements, `bot backtest` (Brier vs market, calibration, pessimistic
+   P&L) decides which strategy, if any, is switched to `trade` on demo. Caveats are printed first, by design.
+3. **Position manager (approved, build after step 2).** Take-profit / edge-gone / time-based exits for open
+   positions, using the existing reduce-only close path through the RiskEngine. Exit rules must compare the
+   locked-in value after a second taker fee against the model's expected value of holding. Ships observe-first
+   ("would sell" logged), then switched on in config, with tests.
+4. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
+5. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
+   venue; set `strategies.weather.nws_user_agent` to a real contact.
