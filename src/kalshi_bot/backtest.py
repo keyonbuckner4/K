@@ -51,6 +51,7 @@ class BacktestReport:
     hit_rate: float | None = None
     unresolved: int = 0
     caveats: list[str] = field(default_factory=list)
+    by_strategy: dict[str, dict[str, Any]] = field(default_factory=dict)   # the same scores, per strategy
 
     def to_dict(self) -> dict[str, Any]:
         return {"since": self.since, "n_scored": self.n_scored, "brier_model": self.brier_model, "n_paired": self.n_paired,
@@ -59,7 +60,7 @@ class BacktestReport:
                 "verdict": self.verdict,
                 "calibration": self.calibration, "n_candidates": self.n_candidates, "pnl_cents": str(self.pnl_cents),
                 "pnl_by_strategy": {k: str(v) for k, v in self.pnl_by_strategy.items()}, "hit_rate": self.hit_rate,
-                "unresolved": self.unresolved, "caveats": self.caveats}
+                "unresolved": self.unresolved, "caveats": self.caveats, "by_strategy": self.by_strategy}
 
 
 RESULT_SYNC_DAYS = 45.0   # markets priced longer ago than this are no longer asked about
@@ -99,12 +100,26 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
         bm = 0.0
         paired: list[tuple[float, float, float]] = []   # (model p, market p, outcome)
         buckets: dict[int, list[tuple[float, float]]] = {}
+        per: dict[str, dict[str, Any]] = {}
         for r, y in scored:
             p = float(r["model_prob"])
             bm += (p - y) ** 2
             buckets.setdefault(min(9, int(p * 10)), []).append((p, y))
+            st = per.setdefault(r["strategy"], {"n_scored": 0, "n_contested": 0, "_bm": 0.0, "_bk": 0.0})
+            st["n_scored"] += 1
             if r["price"]:
-                paired.append((p, float(r["price"]), y))
+                m = float(r["price"])
+                paired.append((p, m, y))
+                if CONTESTED_LO <= m <= CONTESTED_HI:
+                    st["n_contested"] += 1
+                    st["_bm"] += (p - y) ** 2
+                    st["_bk"] += (m - y) ** 2
+        for st in per.values():
+            n = st.pop("n_contested")
+            st["n_contested"] = n
+            st["brier_model_contested"] = round(st.pop("_bm") / n, 4) if n else None
+            st["brier_market_contested"] = round(st.pop("_bk") / n, 4) if n else None
+        rep.by_strategy = per
         rep.brier_model = bm / len(scored)
         rep.calibration = [{"bucket": f"{b / 10:.1f}-{(b + 1) / 10:.1f}", "n": len(v), "mean_p": sum(p for p, _ in v) / len(v),
                             "realized": sum(y for _, y in v) / len(v)} for b, v in sorted(buckets.items())]
@@ -147,8 +162,12 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
         pnl = (gross - fee) * 100
         rep.pnl_cents += pnl
         rep.pnl_by_strategy[r["strategy"]] = rep.pnl_by_strategy.get(r["strategy"], Decimal("0")) + pnl
+        st = rep.by_strategy.setdefault(r["strategy"], {"n_scored": 0, "n_contested": 0, "brier_model_contested": None, "brier_market_contested": None})
+        st["n_candidates"] = st.get("n_candidates", 0) + 1
+        st["pnl_cents"] = str(Decimal(st.get("pnl_cents", "0")) + pnl)
         if pnl > 0:
             hits += 1
+            st["hits"] = st.get("hits", 0) + 1
     rep.hit_rate = hits / rep.n_candidates if rep.n_candidates else None
     rep.caveats = caveats(rep)
     return rep

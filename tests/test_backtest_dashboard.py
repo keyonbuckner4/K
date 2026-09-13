@@ -222,3 +222,30 @@ def test_dashboard_shows_a_failed_scoring_run(tmp_path):
     assert "Scoring failed at" in page and "ValueError: bad row" in page and "last_scoring_error" not in page.split("Risk state")[1].split("Equity")[0]
     assert "Scoring failed" not in render_scorecard(None, None)
     s.close()
+
+
+def test_backtest_breaks_scores_down_by_strategy(tmp_path):
+    from kalshi_bot.dashboard import render_scorecard
+
+    st = settings(tmp_path)
+    s = Storage(st.db_path, log_heartbeat_sec=0)
+    t = time.time() - 3600
+    # weather: two contested markets, model far off; crypto: two contested markets, model close
+    rows = [("weather", "W-1", "0.80", "0.30", 0), ("weather", "W-2", "0.20", "0.70", 1),
+            ("crypto", "C-1", "0.30", "0.40", 0), ("crypto", "C-2", "0.70", "0.55", 1), ("crypto", "C-3", "0.99", "0.99", 1)]
+    for strat, tk, p, price, res in rows:
+        s.log_decision(strat, "model", False, "view", market_ticker=tk, model_prob=Decimal(p), price=Decimal(price), book_side="bid", ts=t)
+        s.save_market_result(tk, tk.split("-")[0], "yes" if res else "no", t + 60)
+    s.log_decision("crypto", "model", True, "candidate", market_ticker="C-2", model_prob=Decimal("0.70"), price=Decimal("0.55"), book_side="bid",
+                   count=5, ts=t + 1)
+    rep = run_backtest(s, since_days=1)
+    by = rep.to_dict()["by_strategy"]
+    assert by["weather"]["n_scored"] == 2 and by["weather"]["n_contested"] == 2
+    assert by["crypto"]["n_scored"] == 3 and by["crypto"]["n_contested"] == 2   # the 0.99 market is not contested
+    assert by["weather"]["brier_model_contested"] > by["weather"]["brier_market_contested"]
+    assert by["crypto"]["brier_model_contested"] < by["crypto"]["brier_market_contested"]
+    assert by["crypto"]["n_candidates"] == 1 and by["crypto"]["hits"] == 1 and Decimal(by["crypto"]["pnl_cents"]) > 0
+    assert "n_candidates" not in by["weather"]
+    page = render_scorecard(rep.to_dict())
+    assert "By strategy" in page and "<td>weather</td>" in page and "<td>crypto</td>" in page
+    s.close()

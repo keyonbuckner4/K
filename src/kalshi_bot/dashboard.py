@@ -76,9 +76,19 @@ def render_scorecard(card: dict[str, Any] | None, error: dict[str, Any] | None =
         by = ", ".join(f"{k}: {v}" for k, v in (act.get("by_strategy") or {}).items()) or "none"
         activity = (f"<p>Trade rate: {act.get('distinct_positions', 0)} distinct positions would have traded over {act.get('days_observed', 0)} days, "
                     f"about {act.get('trades_per_day', 0)} per day or {act.get('trades_per_week', 0)} per week ({by}).</p>")
+    per = card.get("by_strategy") or {}
+    by_rows = "".join(
+        f"<tr><td>{html.escape(str(k))}</td><td>{v.get('n_scored', 0)}</td><td>{v.get('n_contested', 0)}</td>"
+        f"<td>{v.get('brier_model_contested') if v.get('brier_model_contested') is not None else '-'}</td>"
+        f"<td>{v.get('brier_market_contested') if v.get('brier_market_contested') is not None else '-'}</td>"
+        f"<td>{v.get('n_candidates', 0)}</td><td>{v.get('hits', 0)}</td><td>{v.get('pnl_cents', '0')}</td></tr>" for k, v in sorted(per.items()))
+    by_table = ("<p>By strategy (contested markets only for the Brier columns):</p><table><tr><th>strategy</th><th>scored</th><th>contested</th>"
+                "<th>Brier model</th><th>Brier market</th><th>candidates</th><th>winners</th><th>pessimistic P&amp;L (c)</th></tr>"
+                f"{by_rows}</table>") if by_rows else ""
     return (warn + activity + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
             f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
             f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
+            + by_table +
             f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
             f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
 
