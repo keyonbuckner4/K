@@ -18,6 +18,11 @@ ws = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
 [storage]
 db_path = "data/bot.db"   # the bot appends .demo / .live before the extension
+# Per-market model views and quotes are written when they change (to the cent) or every log_heartbeat_sec,
+# not on every scan: a row per market per scan was 2-3 million rows a day. Old rows are pruned hourly.
+log_heartbeat_sec = 1800
+retention_days_decisions = 60
+retention_days_quotes = 30
 
 [ratelimit]
 # Fallback only. The bot reads GET /account/limits at startup and uses the live numbers.

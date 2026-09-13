@@ -192,3 +192,33 @@ def test_dashboard_render_bug_becomes_an_error_page(tmp_path, monkeypatch):
     finally:
         d.stop()
         s.close()
+
+
+def test_scorecard_sees_settled_markets_behind_a_flood_of_newer_rows(tmp_path):
+    """The old query read only the newest 100k rows, so a busy bot hid every settled market from the scorecard."""
+    st = settings(tmp_path)
+    s = Storage(st.db_path, log_heartbeat_sec=0)
+    t0 = time.time() - 5 * 86400
+    s.log_decision("weather", "model", True, "settled long ago", market_ticker="OLD-1", model_prob=Decimal("0.80"), price=Decimal("0.45"),
+                   book_side="bid", count=5, ts=t0)
+    s.save_market_result("OLD-1", "OLD", "yes", t0 + 3600)
+    s.conn.execute("BEGIN")
+    for i in range(3000):
+        s.log_decision("crypto", "model", False, "newer view", market_ticker=f"NEW-{i % 300}", model_prob=Decimal("0.5"), price=Decimal("0.5"),
+                       ts=t0 + 86400 + i)
+    s.conn.execute("COMMIT")
+    rep = run_backtest(s, since_days=30)
+    assert rep.n_scored == 1 and rep.unresolved == 300
+    s.close()
+
+
+def test_dashboard_shows_a_failed_scoring_run(tmp_path):
+    from kalshi_bot.dashboard import render_scorecard
+
+    st = settings(tmp_path)
+    s = Storage(st.db_path)
+    s.set_state("last_scoring_error", {"ts": time.time(), "error": "ValueError: bad row"})
+    page = render(status_payload(st, s))
+    assert "Scoring failed at" in page and "ValueError: bad row" in page and "last_scoring_error" not in page.split("Risk state")[1].split("Equity")[0]
+    assert "Scoring failed" not in render_scorecard(None, None)
+    s.close()

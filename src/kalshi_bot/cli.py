@@ -308,6 +308,19 @@ async def cmd_backtest(args, settings):
     _print(out)
 
 
+def cmd_compact(args, settings):
+    """Shrink a database written before log throttling existed. Refuses to run while the bot holds the lock."""
+    from .lock import InstanceLock
+
+    with InstanceLock(settings.db_path.with_suffix(".lock")):
+        storage = Storage(settings.db_path)
+        try:
+            print(f"compacting {settings.db_path} (keeping one model row and one quote per market per {args.bucket_min} min)...", file=sys.stderr)
+            _print(storage.compact(bucket_sec=float(args.bucket_min) * 60))
+        finally:
+            storage.close()
+
+
 async def cmd_review(args, settings):
     from .review import weekly_review
 
@@ -465,6 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hours", default=24)
     s.add_argument("--strategy")
     s.add_argument("--limit", default=200)
+    s = sub.add_parser("compact", help="shrink the database: one model row and one quote per market per bucket (bot must be stopped)")
+    s.add_argument("--bucket-min", default=30, type=float)
     s = sub.add_parser("dashboard", help="status page with HALT button")
     s.add_argument("--port", type=int)
     s = sub.add_parser("halt", help="create the HALT file")
@@ -481,7 +496,7 @@ COMMANDS = {"setup": cmd_setup, "balance": cmd_balance, "doctor": cmd_doctor, "s
             "series": cmd_series, "scan": cmd_scan, "run": cmd_run, "watch": cmd_watch, "positions": cmd_positions, "orders": cmd_orders,
             "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "review": cmd_review, "gaps": cmd_gaps,
             "decisions": cmd_decisions, "dashboard": cmd_dashboard}
-SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume}
+SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume, "compact": cmd_compact}
 
 
 def main(argv: list[str] | None = None) -> int:

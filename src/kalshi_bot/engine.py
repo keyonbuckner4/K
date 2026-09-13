@@ -91,7 +91,9 @@ class Engine:
         self.use_ws = use_ws
         cfg = settings.toml
         self.cfg = cfg
-        self.storage = Storage(settings.db_path)
+        st_cfg = cfg.get("storage", {}) or {}
+        self.storage = Storage(settings.db_path, log_heartbeat_sec=float(st_cfg.get("log_heartbeat_sec", 1800)))
+        self.retention_days = (float(st_cfg.get("retention_days_decisions", 60)), float(st_cfg.get("retention_days_quotes", 30)))
         self.limiter = SharedRateLimiter.from_config(cfg.get("ratelimit"))
         self.signer = KalshiSigner.from_pem_file(settings.api_key_id, settings.private_key_path) if settings.has_credentials else None
         self.client = KalshiClient(settings, self.limiter, self.signer, transport=transport)
@@ -383,10 +385,16 @@ class Engine:
         card = rep.to_dict()
         card.update({"ts": time.time(), "synced_results": synced, "activity": activity_stats(self.storage, 7.0)})
         self.storage.set_state("last_backtest", card)
+        self.storage.set_state("last_scoring_error", None)
         self._last_score = time.time()
-        log.info("model scorecard: %d scored, brier model=%s market=%s, %d candidates, pnl %sc (pessimistic), %d unresolved",
-                 rep.n_scored, f"{rep.brier_model:.4f}" if rep.brier_model is not None else "-",
-                 f"{rep.brier_market:.4f}" if rep.brier_market is not None else "-", rep.n_candidates, rep.pnl_cents, rep.unresolved)
+        log.info("model scorecard: %d scored (%d contested), brier model=%s market=%s, %d candidates, pnl %sc (pessimistic), %d unresolved, "
+                 "%d results synced; verdict: %s", rep.n_scored, rep.n_contested, f"{rep.brier_model:.4f}" if rep.brier_model is not None else "-",
+                 f"{rep.brier_market:.4f}" if rep.brier_market is not None else "-", rep.n_candidates, rep.pnl_cents, rep.unresolved, synced, rep.verdict)
+        pruned = self.storage.prune(*self.retention_days)
+        if any(pruned.values()):
+            log.info("pruned old rows: %s (retention %s days decisions, %s days quotes)", pruned, *self.retention_days)
+        log.info("log volume: %d decision rows and %d quote rows suppressed as unchanged since start", self.storage.suppressed["decisions"],
+                 self.storage.suppressed["quotes"])
         return card
 
     # ---- loop ----------------------------------------------------------------------------------------
@@ -400,8 +408,9 @@ class Engine:
                     await self.score_models()
                 except UnexpectedApiResponse:
                     raise
-                except Exception as e:  # scoring must never stop the scan loop
-                    log.error("model scoring failed: %s", e)
+                except Exception as e:  # scoring must never stop the scan loop, but the failure must be visible
+                    log.exception("model scoring failed: %s: %s", type(e).__name__, e)
+                    self.storage.set_state("last_scoring_error", {"ts": time.time(), "error": f"{type(e).__name__}: {e}"})
                     self._last_score = time.time()
             if self.feed and self._feed_tickers:
                 if self._feed_task is None or self._feed_task.done():

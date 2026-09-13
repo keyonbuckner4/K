@@ -122,6 +122,17 @@ undocumented API response, crash with traceback) is written to `data\logs\bot.de
 copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be on and
 logged in; for true 24/7 use a small always-on server (roadmap item 5).
 
+## Decision log volume
+
+Every scan prices every open market (about 1,400). A row per market per scan was 2-3 million rows a day,
+and the scorecard, which read only the newest 100,000 rows, stopped seeing settled markets after the first
+hours. Now the scorecard resolves "latest model view per market" in SQL with no row cap, and per-market model
+rows and quotes are written only when they change to the cent or every `log_heartbeat_sec` (30 min). Gate,
+execute, order and fill rows are never throttled. Rows older than `retention_days_decisions` /
+`retention_days_quotes` are pruned hourly. A database written before this change can be shrunk once with
+`uv run bot compact` while the bot is stopped (it keeps one model row and one quote per market per 30 minutes). A failed hourly scoring shows in red on the dashboard and in the
+log as `model scoring failed` with a traceback.
+
 ## Roadmap (agreed with the operator)
 
 1. **Observe period, in progress.** `bot run --dashboard` started on demo on 2026-09-11 00:53 UTC with all

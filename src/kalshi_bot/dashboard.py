@@ -51,9 +51,20 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="ref
 </body></html>"""
 
 
-def render_scorecard(card: dict[str, Any] | None) -> str:
+def _fmt_ts(ts: Any) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def render_scorecard(card: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
+    warn = ""
+    if error:
+        warn = (f"<p class='bad'>Scoring failed at {_fmt_ts(error.get('ts'))}: {html.escape(str(error.get('error')))}. "
+                f"The numbers below are from the last successful run; the traceback is in the log file.</p>")
     if not card:
-        return "<p>No settlements scored yet. The bot re-scores every hour; the first weather settlements arrive the morning after a market's date.</p>"
+        return warn + "<p>No settlements scored yet. The bot re-scores every hour; the first weather settlements arrive the morning after a market's date.</p>"
     verdict = str(card.get("verdict") or "no scored markets yet")
     good = verdict.startswith("model beats")
     cal = "".join(f"<tr><td>{c['bucket']}</td><td>{c['n']}</td><td>{c['mean_p']:.2f}</td><td>{c['realized']:.2f}</td></tr>" for c in card.get("calibration", []))
@@ -65,18 +76,11 @@ def render_scorecard(card: dict[str, Any] | None) -> str:
         by = ", ".join(f"{k}: {v}" for k, v in (act.get("by_strategy") or {}).items()) or "none"
         activity = (f"<p>Trade rate: {act.get('distinct_positions', 0)} distinct positions would have traded over {act.get('days_observed', 0)} days, "
                     f"about {act.get('trades_per_day', 0)} per day or {act.get('trades_per_week', 0)} per week ({by}).</p>")
-    return (activity + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
+    return (warn + activity + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
             f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
             f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
             f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
             f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
-
-
-def _fmt_ts(ts: Any) -> str:
-    try:
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
-    except (TypeError, ValueError):
-        return "?"
 
 
 def render_bot_line(payload: dict[str, Any]) -> str:
@@ -114,9 +118,9 @@ def render(payload: dict[str, Any]) -> str:
                    f"<td>{g['n_legs']}</td><td>{g['gross_edge_cents']}</td><td>{g['fee_cents']}</td><td>{g['net_edge_cents']}</td></tr>" for g in payload["recent_gaps"])
     halted = payload["halt_file"]
     halt_line = "<p class='bad'>HALT file present: all order placement blocked. <form method='post' action='/resume-file' style='display:inline'><button type='submit'>remove HALT file</button></form></p>" if halted else "<p class='ok'>no HALT file</p>"
-    state = {k: v for k, v in payload["risk_state"].items() if k != "last_backtest"}
+    state = {k: v for k, v in payload["risk_state"].items() if k not in ("last_backtest", "last_scoring_error")}
     return PAGE.format(env=payload["env"], cls="bad" if payload["env"] == "live" else "ok", halt_line=halt_line, bot_line=render_bot_line(payload),
-                       scorecard=render_scorecard(payload["risk_state"].get("last_backtest")),
+                       scorecard=render_scorecard(payload["risk_state"].get("last_backtest"), payload["risk_state"].get("last_scoring_error")),
                        state=html.escape(json.dumps(state, indent=1, default=str)), equity=html.escape(json.dumps(payload["equity"], default=str)),
                        decisions=rows, gaps=gaps)
 

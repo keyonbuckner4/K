@@ -4,6 +4,7 @@ reason, including rejections, so the log is the audit trail the BRIEF asks for."
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import asdict, is_dataclass
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS decisions_ts ON decisions(ts);
 CREATE INDEX IF NOT EXISTS decisions_market ON decisions(market_ticker, ts);
+CREATE INDEX IF NOT EXISTS decisions_stage_market ON decisions(stage, market_ticker, ts);
 
 CREATE TABLE IF NOT EXISTS quotes (
     ts REAL NOT NULL,
@@ -158,8 +160,44 @@ def _s(v: Any) -> str | None:
     return None if v is None else str(v)
 
 
+_NUMS = re.compile(r"-?\d+(?:\.\d+)?")
+THROTTLED_STAGES = ("model", "ladder")   # per-market model views: one row per material change, plus a heartbeat
+
+
+class LogThrottle:
+    """Suppress rows that repeat the previous row for the same key within ``heartbeat`` seconds.
+
+    The bot prices every open market on every scan (about 1,400 markets every 30-60 s). Writing a row each
+    time was 2-3 million rows a day, which made the scorecard's read window miss every settled market.
+    A row is written when the material content changes, or when the last row is older than the heartbeat."""
+
+    def __init__(self, heartbeat_sec: float = 1800.0):
+        self.heartbeat = float(heartbeat_sec)
+        self._last: dict[Any, tuple[Any, float]] = {}
+
+    def should_write(self, key: Any, signature: Any, now: float) -> bool:
+        prev = self._last.get(key)
+        if prev is not None and prev[0] == signature and now - prev[1] < self.heartbeat:
+            return False
+        self._last[key] = (signature, now)
+        return True
+
+    def forget(self) -> None:
+        self._last.clear()
+
+
+def _cents(v: Any) -> str | None:
+    """Price-like value rounded to a cent, so tick-level noise below a cent does not count as a change."""
+    if v is None:
+        return None
+    try:
+        return f"{Decimal(str(v)):.2f}"
+    except Exception:
+        return str(v)
+
+
 class Storage:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, log_heartbeat_sec: float = 1800.0):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
@@ -167,6 +205,9 @@ class Storage:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self.decision_throttle = LogThrottle(log_heartbeat_sec)
+        self.quote_throttle = LogThrottle(log_heartbeat_sec)
+        self.suppressed = {"decisions": 0, "quotes": 0}
 
     def close(self) -> None:
         self.conn.close()
@@ -176,14 +217,72 @@ class Storage:
                      market_ticker: str | None = None, book_side: str | None = None, price: Any = None, count: Any = None,
                      model_prob: Any = None, edge_gross_cents: Any = None, fee_cents: Any = None, edge_net_cents: Any = None,
                      details: Any = None, ts: float | None = None) -> int:
+        ts = ts or time.time()
+        if stage in THROTTLED_STAGES:
+            key = (strategy, stage, event_ticker, market_ticker)
+            sig = (bool(accepted), _NUMS.sub("#", reason), _cents(model_prob), _cents(price), book_side)
+            if not self.decision_throttle.should_write(key, sig, ts):
+                self.suppressed["decisions"] += 1
+                return -1
         cur = self.conn.execute(
             "INSERT INTO decisions(ts,strategy,event_ticker,market_ticker,book_side,price,count,model_prob,edge_gross_cents,"
             "fee_cents,edge_net_cents,accepted,stage,reason,details) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ts or time.time(), strategy, event_ticker, market_ticker, book_side, _s(price), _s(count), _s(model_prob),
+            (ts, strategy, event_ticker, market_ticker, book_side, _s(price), _s(count), _s(model_prob),
              _s(edge_gross_cents), _s(fee_cents), _s(edge_net_cents), 1 if accepted else 0, stage, reason,
              dumps(details) if details is not None else None),
         )
         return int(cur.lastrowid)
+
+    def latest_model_decisions(self, since: float) -> list[dict[str, Any]]:
+        """The newest priced ('model' stage with a model probability) row per market since ``since``.
+        Done in SQL so the answer does not depend on how many rows the table holds."""
+        rows = self.conn.execute(
+            "SELECT d.* FROM decisions d JOIN (SELECT market_ticker, MAX(ts) AS ts FROM decisions"
+            " WHERE stage = 'model' AND model_prob IS NOT NULL AND market_ticker IS NOT NULL AND ts >= ? GROUP BY market_ticker) l"
+            " ON l.market_ticker = d.market_ticker AND l.ts = d.ts WHERE d.stage = 'model' AND d.model_prob IS NOT NULL"
+            " GROUP BY d.market_ticker ORDER BY d.ts", (since,))
+        return [dict(r) for r in rows]
+
+    def latest_candidate_decisions(self, since: float) -> list[dict[str, Any]]:
+        """The newest accepted model candidate row per market since ``since`` (what the pessimistic P&L is scored on)."""
+        rows = self.conn.execute(
+            "SELECT d.* FROM decisions d JOIN (SELECT market_ticker, MAX(ts) AS ts FROM decisions"
+            " WHERE stage = 'model' AND accepted = 1 AND model_prob IS NOT NULL AND market_ticker IS NOT NULL AND ts >= ? GROUP BY market_ticker) l"
+            " ON l.market_ticker = d.market_ticker AND l.ts = d.ts WHERE d.stage = 'model' AND d.accepted = 1"
+            " GROUP BY d.market_ticker ORDER BY d.ts", (since,))
+        return [dict(r) for r in rows]
+
+    def execute_decisions(self, since: float) -> list[dict[str, Any]]:
+        """Accepted execute-stage rows (observed or placed) since ``since``."""
+        rows = self.conn.execute("SELECT * FROM decisions WHERE stage = 'execute' AND accepted = 1 AND ts >= ? ORDER BY ts", (since,))
+        return [dict(r) for r in rows]
+
+    def prune(self, decisions_days: float, quotes_days: float, now: float | None = None) -> dict[str, int]:
+        """Delete decision rows older than ``decisions_days`` and quote rows older than ``quotes_days``."""
+        now = time.time() if now is None else now
+        out = {}
+        for table, days in (("decisions", decisions_days), ("quotes", quotes_days)):
+            if days and days > 0:
+                out[table] = self.conn.execute(f"DELETE FROM {table} WHERE ts < ?", (now - days * 86400,)).rowcount
+        return out
+
+    def compact(self, bucket_sec: float = 1800.0) -> dict[str, Any]:
+        """One-time cleanup of rows written before throttling existed: keep the newest model/ladder row per
+        market (or event) per ``bucket_sec`` window and the newest quote per market per window, then VACUUM.
+        Run only while the bot is stopped (the CLI takes the instance lock first)."""
+        before = {"decisions": self.conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0],
+                  "quotes": self.conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0], "bytes": self.path.stat().st_size}
+        self.conn.execute("BEGIN")
+        self.conn.execute(
+            "DELETE FROM decisions WHERE stage IN ('model', 'ladder') AND id NOT IN (SELECT MAX(id) FROM decisions WHERE stage IN ('model', 'ladder')"
+            " GROUP BY strategy, stage, event_ticker, market_ticker, CAST(ts / ? AS INTEGER))", (bucket_sec,))
+        self.conn.execute(
+            "DELETE FROM quotes WHERE rowid NOT IN (SELECT MAX(rowid) FROM quotes GROUP BY market_ticker, CAST(ts / ? AS INTEGER))", (bucket_sec,))
+        self.conn.execute("COMMIT")
+        self.conn.execute("VACUUM")
+        after = {"decisions": self.conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0],
+                 "quotes": self.conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0], "bytes": self.path.stat().st_size}
+        return {"before": before, "after": after}
 
     def decisions(self, since: float | None = None, strategy: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         q = "SELECT * FROM decisions WHERE 1=1"
@@ -201,8 +300,12 @@ class Storage:
     # ---- quotes / gaps / forecasts ----------------------------------------------------
     def log_quote(self, market_ticker: str, yes_bid: Any, yes_ask: Any, yes_bid_size: Any, yes_ask_size: Any,
                   close_time: Any = None, ts: float | None = None) -> None:
+        ts = ts or time.time()
+        if not self.quote_throttle.should_write(market_ticker, (_cents(yes_bid), _cents(yes_ask)), ts):
+            self.suppressed["quotes"] += 1
+            return
         self.conn.execute("INSERT INTO quotes VALUES (?,?,?,?,?,?,?)",
-                          (ts or time.time(), market_ticker, _s(yes_bid), _s(yes_ask), _s(yes_bid_size), _s(yes_ask_size),
+                          (ts, market_ticker, _s(yes_bid), _s(yes_ask), _s(yes_bid_size), _s(yes_ask_size),
                            close_time.isoformat() if hasattr(close_time, "isoformat") else _s(close_time)))
 
     def log_arb_gap(self, event_ticker: str, kind: str, n_legs: int, sum_price: Any, gross_edge_cents: Any, fee_cents: Any,
@@ -360,8 +463,11 @@ class Storage:
             rows = self.conn.execute(f"SELECT market_ticker, result FROM market_results WHERE market_ticker IN ({','.join('?' * len(tl))})", tl)
         return {r["market_ticker"]: r["result"] for r in rows}
 
-    def unresolved_decision_markets(self) -> list[str]:
-        rows = self.conn.execute(
-            "SELECT DISTINCT d.market_ticker FROM decisions d LEFT JOIN market_results m ON m.market_ticker = d.market_ticker"
-            " WHERE d.market_ticker IS NOT NULL AND d.model_prob IS NOT NULL AND (m.result IS NULL OR m.result = '')")
-        return [r["market_ticker"] for r in rows]
+    def unresolved_decision_markets(self, since: float | None = None) -> list[str]:
+        q = ("SELECT DISTINCT market_ticker FROM decisions WHERE market_ticker IS NOT NULL AND model_prob IS NOT NULL"
+             " AND market_ticker NOT IN (SELECT market_ticker FROM market_results WHERE result IN ('yes', 'no'))")
+        args: list[Any] = []
+        if since is not None:
+            q += " AND ts >= ?"
+            args.append(since)
+        return [r["market_ticker"] for r in self.conn.execute(q, args)]

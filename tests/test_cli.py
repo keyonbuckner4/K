@@ -56,7 +56,7 @@ def test_balance_without_credentials_fails_cleanly(tmp_path, capsys):
 def test_parser_has_every_command():
     p = cli.build_parser()
     names = set(cli.COMMANDS) | set(cli.SYNC_COMMANDS)
-    assert {"balance", "doctor", "scan", "run", "halt", "resume", "backtest", "review", "dashboard", "watch", "flatten"} <= names
+    assert {"balance", "doctor", "scan", "run", "halt", "resume", "backtest", "review", "dashboard", "watch", "flatten", "compact"} <= names
     args = p.parse_args(["run", "--trade", "--strategy", "ladder_arb", "--dashboard"])
     assert args.trade and args.strategy == ["ladder_arb"] and args.dashboard
 
@@ -100,3 +100,18 @@ def test_main_writes_every_exit_reason_to_the_log_file(tmp_path, monkeypatch):
     monkeypatch.setitem(cli.COMMANDS, "status", undocumented)
     assert cli.main(["--root", str(root), "--quiet", "status"]) == 3
     assert "exit 3 (status): undocumented API response: weird shape" in log_file.read_text()
+
+
+def test_compact_refuses_while_the_bot_holds_the_lock(tmp_path, capsys):
+    from kalshi_bot.lock import InstanceLock
+
+    root = make_root(tmp_path)
+    Storage(root / "data" / "bot.demo.db").close()
+    held = InstanceLock(root / "data" / "bot.demo.lock").acquire()
+    try:
+        assert cli.main(["--root", str(root), "--quiet", "compact"]) == 1
+        assert "already active" in capsys.readouterr().err
+    finally:
+        held.release()
+    assert cli.main(["--root", str(root), "--quiet", "compact"]) == 0
+    assert '"after"' in capsys.readouterr().out

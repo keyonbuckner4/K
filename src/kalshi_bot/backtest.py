@@ -62,11 +62,14 @@ class BacktestReport:
                 "unresolved": self.unresolved, "caveats": self.caveats}
 
 
+RESULT_SYNC_DAYS = 45.0   # markets priced longer ago than this are no longer asked about
+
+
 async def sync_results(storage: Storage, client: KalshiClient | None) -> int:
     """Fetch settlement results for markets we priced but have not resolved yet."""
     if client is None:
         return 0
-    tickers = storage.unresolved_decision_markets()
+    tickers = storage.unresolved_decision_markets(since=time.time() - RESULT_SYNC_DAYS * 86400)
     n = 0
     for i in range(0, len(tickers), 100):
         chunk = tickers[i:i + 100]
@@ -85,12 +88,9 @@ async def sync_results(storage: Storage, client: KalshiClient | None) -> int:
 def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Decimal = Decimal("0.07")) -> BacktestReport:
     since = time.time() - since_days * 86400
     rep = BacktestReport(since=since)
-    rows = [r for r in storage.decisions(since=since, limit=100000) if r["stage"] == "model" and r["model_prob"]]
-    results = storage.market_results({r["market_ticker"] for r in rows})
-    # keep the latest model view per market to avoid counting one market many times per scan
-    latest: dict[str, dict[str, Any]] = {}
-    for r in sorted(rows, key=lambda r: r["ts"]):
-        latest[r["market_ticker"]] = r
+    # the latest model view per market, resolved in SQL: a row cap here once hid every settled market
+    latest = {r["market_ticker"]: r for r in storage.latest_model_decisions(since) if r["model_prob"]}
+    results = storage.market_results(set(latest))
     scored = [(r, results.get(r["market_ticker"])) for r in latest.values()]
     rep.unresolved = sum(1 for _, y in scored if y not in ("yes", "no"))
     scored = [(r, 1.0 if y == "yes" else 0.0) for r, y in scored if y in ("yes", "no")]
@@ -126,11 +126,9 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
                            f"(markets priced between {int(CONTESTED_LO * 100)}c and {int(CONTESTED_HI * 100)}c; far-from-the-money markets prove nothing)")
 
     # pessimistic P&L on accepted model candidates
-    cands = [r for r in rows if r["accepted"] == 1 and r["book_side"] in ("bid", "ask") and r["count"]]
+    latest_c = {r["market_ticker"]: r for r in storage.latest_candidate_decisions(since) if r["book_side"] in ("bid", "ask") and r["count"]}
+    results.update(storage.market_results(set(latest_c) - set(results)))
     hits = 0
-    latest_c: dict[str, dict[str, Any]] = {}
-    for r in sorted(cands, key=lambda r: r["ts"]):
-        latest_c[r["market_ticker"]] = r
     for r in latest_c.values():
         y = results.get(r["market_ticker"])
         if y not in ("yes", "no"):
@@ -161,7 +159,7 @@ def activity_stats(storage: Storage, days: float = 7.0, now: float | None = None
     (observed, or filled in trade mode), per day and per week, over the window actually covered."""
     now = time.time() if now is None else now
     since = now - days * 86400
-    rows = [r for r in storage.decisions(since=since, limit=100000) if r["stage"] == "execute" and r["accepted"]]
+    rows = storage.execute_decisions(since)
     if not rows:
         return {"window_days": days, "days_observed": 0.0, "trades_per_day": 0.0, "trades_per_week": 0.0, "distinct_positions": 0, "by_strategy": {}}
     first = min(r["ts"] for r in rows)
