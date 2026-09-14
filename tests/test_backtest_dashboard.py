@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from kalshi_bot.backtest import run_backtest
+from kalshi_bot.backtest import MODEL_VERSION, run_backtest
 from kalshi_bot.dashboard import Dashboard, render, status_payload
 from kalshi_bot.review import weekly_review
 from kalshi_bot.storage import Storage
@@ -25,6 +25,7 @@ def seed(storage):
 
 def test_backtest_scores_and_caveats(tmp_path):
     s = Storage(tmp_path / "x.db")
+    s.set_state("model_version", MODEL_VERSION), s.set_state("model_version_since", 0)   # seeded decisions belong to this model
     seed(s)
     rep = run_backtest(s, since_days=1)
     assert rep.n_scored == 4 and rep.unresolved == 1 and rep.n_candidates == 3
@@ -39,6 +40,7 @@ def test_backtest_scores_and_caveats(tmp_path):
 
 def test_backtest_verdict_needs_contested_sample_and_ignores_missing_market_prices(tmp_path):
     s = Storage(tmp_path / "x.db")
+    s.set_state("model_version", MODEL_VERSION), s.set_state("model_version_since", 0)   # seeded decisions belong to this model
     # 25 far-from-the-money markets with no market price: the model is trivially right; the market must not score
     for i in range(25):
         s.log_decision("crypto", "model", False, "no two-sided book", market_ticker=f"C-{i}", model_prob=Decimal("0.0"))
@@ -55,6 +57,7 @@ def test_backtest_verdict_needs_contested_sample_and_ignores_missing_market_pric
     assert rep.caveats[0].startswith("On contested markets the model's Brier score is NOT better")
     # and a positive one when the model is right where the market was wrong
     s2 = Storage(tmp_path / "y.db")
+    s2.set_state("model_version", MODEL_VERSION), s2.set_state("model_version_since", 0)
     for i in range(20):
         s2.log_decision("weather", "model", True, "t", market_ticker=f"W-{i}", model_prob=Decimal("0.8"), price=Decimal("0.3"), book_side="bid", count=1)
         s2.save_market_result(f"W-{i}", "W", "yes", time.time())
@@ -114,6 +117,8 @@ def test_activity_stats_counts_distinct_positions_per_day(tmp_path):
     import calendar
 
     s = Storage(tmp_path / "x.db")
+
+    s.set_state("model_version", MODEL_VERSION), s.set_state("model_version_since", 0)   # seeded decisions belong to this model
     assert activity_stats(s)["trades_per_week"] == 0.0
     now = calendar.timegm((2026, 9, 10, 12, 0, 0))  # fixed noon UTC so the hour never crosses a day boundary
     for i in range(6):  # the same two markets observed every scan for an hour count once each
@@ -198,6 +203,7 @@ def test_scorecard_sees_settled_markets_behind_a_flood_of_newer_rows(tmp_path):
     """The old query read only the newest 100k rows, so a busy bot hid every settled market from the scorecard."""
     st = settings(tmp_path)
     s = Storage(st.db_path, log_heartbeat_sec=0)
+    s.set_state("model_version", MODEL_VERSION), s.set_state("model_version_since", 0)   # the seeded decisions belong to this model
     t0 = time.time() - 5 * 86400
     s.log_decision("weather", "model", True, "settled long ago", market_ticker="OLD-1", model_prob=Decimal("0.80"), price=Decimal("0.45"),
                    book_side="bid", count=5, ts=t0)
@@ -229,6 +235,7 @@ def test_backtest_breaks_scores_down_by_strategy(tmp_path):
 
     st = settings(tmp_path)
     s = Storage(st.db_path, log_heartbeat_sec=0)
+    s.set_state("model_version", MODEL_VERSION), s.set_state("model_version_since", 0)   # the seeded decisions belong to this model
     t = time.time() - 3600
     # weather: two contested markets, model far off; crypto: two contested markets, model close
     rows = [("weather", "W-1", "0.80", "0.30", 0), ("weather", "W-2", "0.20", "0.70", 1),
@@ -251,4 +258,31 @@ def test_backtest_breaks_scores_down_by_strategy(tmp_path):
     assert "n_candidates" not in by["weather"]
     page = render_scorecard(rep.to_dict())
     assert "By strategy" in page and "<td>weather</td>" in page and "<td>crypto</td>" in page
+    s.close()
+
+
+def test_scorecard_starts_over_at_a_model_change(tmp_path):
+    """Decisions made by an earlier model version are not scored (unless asked for), so a rewrite is judged on its own."""
+    from kalshi_bot.backtest import MODEL_VERSION, model_version_since
+
+    st = settings(tmp_path)
+    s = Storage(st.db_path, log_heartbeat_sec=0)
+    t_old = time.time() - 3 * 86400
+    s.log_decision("weather", "model", True, "old model", market_ticker="OLD-1", model_prob=Decimal("0.80"), price=Decimal("0.45"), book_side="bid",
+                   count=5, ts=t_old)
+    s.save_market_result("OLD-1", "OLD", "no", t_old + 3600)
+    s.set_state("model_version", "previous")
+    s.set_state("model_version_since", t_old - 86400)
+    marker = model_version_since(s, now=t_old + 86400)   # the new version first runs a day after the old decision
+    assert s.all_state()["model_version"] == MODEL_VERSION and marker == t_old + 86400
+    assert run_backtest(s, since_days=30).n_scored == 0                             # the old decision is not this model's
+    assert run_backtest(s, since_days=30, since_model_change=False).n_scored == 1   # --all still shows it
+    s.log_decision("weather", "model", True, "new model", market_ticker="NEW-1", model_prob=Decimal("0.70"), price=Decimal("0.40"), book_side="bid",
+                   count=5, ts=t_old + 2 * 86400)
+    s.save_market_result("NEW-1", "NEW", "yes", t_old + 2 * 86400 + 60)
+    rep = run_backtest(s, since_days=30)
+    assert rep.n_scored == 1 and rep.to_dict()["model_version"] == MODEL_VERSION
+    assert "Only decisions made by this version" in render(status_payload(st, s)) or True  # rendered once the card is stored
+    s.set_state("last_backtest", rep.to_dict())
+    assert "Only decisions made by this version" in render(status_payload(st, s))
     s.close()

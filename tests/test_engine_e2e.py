@@ -241,6 +241,10 @@ def test_engine_scores_models_against_settlements(tmp_path):
     ex = FakeKalshi([ev, old_event], books, SERIES)
     eng = build(tmp_path, ex)
     # a model view logged earlier for the now-settled market
+    from kalshi_bot.backtest import MODEL_VERSION
+
+    eng.storage.set_state("model_version", MODEL_VERSION)
+    eng.storage.set_state("model_version_since", 0)   # the seeded decision belongs to this model
     eng.storage.log_decision("weather", "model", True, "candidate", market_ticker="KXHIGHNY-26SEP09-B76", model_prob=Decimal("0.7"),
                              price=Decimal("0.40"), book_side="bid", count=5)
 

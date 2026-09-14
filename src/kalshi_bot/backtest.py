@@ -63,7 +63,8 @@ class BacktestReport:
                 "calibration": self.calibration, "n_candidates": self.n_candidates, "pnl_cents": str(self.pnl_cents),
                 "pnl_by_strategy": {k: str(v) for k, v in self.pnl_by_strategy.items()}, "hit_rate": self.hit_rate,
                 "brier_model_at_trade": self.brier_model_at_trade, "brier_market_at_trade": self.brier_market_at_trade,
-                "unresolved": self.unresolved, "caveats": self.caveats, "by_strategy": self.by_strategy}
+                "unresolved": self.unresolved, "caveats": self.caveats, "by_strategy": self.by_strategy,
+                "model_version": MODEL_VERSION}
 
 
 RESULT_SYNC_DAYS = 45.0   # markets priced longer ago than this are no longer asked about
@@ -89,8 +90,27 @@ async def sync_results(storage: Storage, client: KalshiClient | None) -> int:
     return n
 
 
-def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Decimal = Decimal("0.07")) -> BacktestReport:
+MODEL_VERSION = "2026-09-14 observation-bounded weather, DVOL crypto, 5c-95c gate"
+
+
+def model_version_since(storage: Storage, now: float | None = None) -> float:
+    """Timestamp from which the current model version's decisions run. Recorded the first time a bot with
+    this MODEL_VERSION touches the database, so a rewrite is judged on its own decisions, not its
+    predecessor's."""
+    state = storage.all_state()
+    if state.get("model_version") != MODEL_VERSION:
+        now = time.time() if now is None else now
+        storage.set_state("model_version", MODEL_VERSION)
+        storage.set_state("model_version_since", now)
+        return now
+    return float(state.get("model_version_since") or 0.0)
+
+
+def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Decimal = Decimal("0.07"),
+                 since_model_change: bool = True) -> BacktestReport:
     since = time.time() - since_days * 86400
+    if since_model_change:
+        since = max(since, model_version_since(storage))
     rep = BacktestReport(since=since)
     # the latest model view per market, resolved in SQL: a row cap here once hid every settled market
     latest = {r["market_ticker"]: r for r in storage.latest_model_decisions(since) if r["model_prob"]}
@@ -183,11 +203,13 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
     return rep
 
 
-def activity_stats(storage: Storage, days: float = 7.0, now: float | None = None) -> dict[str, Any]:
+def activity_stats(storage: Storage, days: float = 7.0, now: float | None = None, since_model_change: bool = True) -> dict[str, Any]:
     """How often the bot would have traded: distinct market/day pairs that reached the execute stage
     (observed, or filled in trade mode), per day and per week, over the window actually covered."""
     now = time.time() if now is None else now
     since = now - days * 86400
+    if since_model_change:
+        since = max(since, model_version_since(storage, now))
     rows = storage.execute_decisions(since)
     if not rows:
         return {"window_days": days, "days_observed": 0.0, "trades_per_day": 0.0, "trades_per_week": 0.0, "distinct_positions": 0, "by_strategy": {}}

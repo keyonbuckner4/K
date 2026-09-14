@@ -90,7 +90,9 @@ def render_scorecard(card: dict[str, Any] | None, error: dict[str, Any] | None =
         bm, bk = float(card["brier_model_at_trade"]), float(card["brier_market_at_trade"])
         at_trade = (f"<p>At the moment it would have traded ({card.get('n_candidates')} candidates): Brier model {bm:.4f} vs market {bk:.4f} "
                     f"<b class='{'ok' if bm < bk else 'bad'}'>{'model knew better' if bm < bk else 'the price knew better'}</b>.</p>")
-    summary = (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
+    version = card.get("model_version")
+    summary = ((f"<p>Model version: {html.escape(str(version))}. Only decisions made by this version are scored.</p>" if version else "")
+               + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
                f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>")
     verdict_line = f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
     cal_table = f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"

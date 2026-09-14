@@ -19,7 +19,7 @@ from typing import Any
 from .account import AccountSnapshot, AccountView
 from .alerts import Alerts
 from .auth import KalshiSigner
-from .backtest import activity_stats, run_backtest, sync_results
+from .backtest import MODEL_VERSION, model_version_since, activity_stats, run_backtest, sync_results
 from .client import KalshiClient
 from .config import LIVE, Settings
 from .errors import BotError, ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
@@ -183,6 +183,8 @@ class Engine:
             info["balance_cents"] = bal.balance_cents
             info["portfolio_value_cents"] = bal.portfolio_value_cents
         info["limiter"] = self.limiter.describe()
+        info["model_version"] = MODEL_VERSION
+        info["scored_since"] = model_version_since(self.storage)
         log.info("startup: %s", info)
         return info
 
