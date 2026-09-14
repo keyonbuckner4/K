@@ -69,12 +69,35 @@ def prob_normal_interval(a: float, b: float, mean: float, sd: float) -> float:
     return max(0.0, min(1.0, hi - lo))
 
 
-def prob_yes_normal(market: Market, mean: float, sd: float, integer_settlement: bool) -> float | None:
+def prob_bounded_interval(a: float, b: float, mean: float, sd: float, floor: float | None = None, cap: float | None = None) -> float:
+    """P(a < X < b) where X = max(floor, R) or X = min(cap, R) and R ~ Normal(mean, sd).
+
+    A daily high already observed at ``floor`` cannot end lower, so the settlement value is the larger
+    of what has happened and what the rest of the day brings; a daily low is the mirror image."""
+    if floor is not None and cap is not None:
+        raise ValueError("floor and cap are mutually exclusive")
+    if floor is not None:
+        if floor >= b:
+            return 0.0
+        if floor > a:
+            return prob_normal_interval(-INF, b, mean, sd)
+        return prob_normal_interval(a, b, mean, sd)
+    if cap is not None:
+        if cap <= a:
+            return 0.0
+        if cap < b:
+            return prob_normal_interval(a, INF, mean, sd)
+        return prob_normal_interval(a, b, mean, sd)
+    return prob_normal_interval(a, b, mean, sd)
+
+
+def prob_yes_normal(market: Market, mean: float, sd: float, integer_settlement: bool, floor: float | None = None,
+                    cap: float | None = None) -> float | None:
     cond = market_condition(market)
     if cond is None:
         return None
     a, b = real_interval(cond, integer_settlement)
-    return prob_normal_interval(a, b, mean, sd)
+    return prob_bounded_interval(a, b, mean, sd, floor=floor, cap=cap)
 
 
 def prob_yes_lognormal(market: Market, spot: float, sigma_annual: float, tau_years: float) -> float | None:

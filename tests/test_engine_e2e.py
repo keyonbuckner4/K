@@ -60,7 +60,7 @@ def make_root(tmp_path, arb_mode="observe", weather_mode="observe"):
 
 
 def fixed_now():
-    return datetime(2026, 9, 10, 15, 0, tzinfo=timezone.utc)
+    return datetime(2026, 9, 10, 13, 0, tzinfo=timezone.utc)   # 09:00 New York: inside the weather model's morning trading window
 
 
 def build(tmp_path, exchange, trade=False, **modes):
@@ -341,3 +341,36 @@ def test_run_logs_a_failed_startup(tmp_path, monkeypatch, caplog):
     with pytest.raises(ApiError):
         asyncio.run(cli.cmd_run(args, eng.settings))
     assert "startup failed: ApiError:" in caplog.text and "exchange unreachable" in caplog.text
+
+
+def test_watchdog_stops_a_hung_run(tmp_path):
+    """A scan that never returns must not leave a process that looks alive: the watchdog cancels the run
+    and it exits with a BotError so the supervisor restarts the bot."""
+    from kalshi_bot.errors import BotError
+
+    ev, books = ladder([("0.10", "0.12"), ("0.18", "0.20"), ("0.28", "0.30"), ("0.15", "0.18")])
+    eng = build(tmp_path, FakeKalshi([ev], books, SERIES))
+    eng.watchdog_sec = 1.0
+    eng.scan_interval = 0.1
+    real_scan = eng.scan_once
+    calls = []
+
+    async def scan_then_hang():
+        calls.append(1)
+        if len(calls) == 1:
+            return await real_scan()
+        await asyncio.Event().wait()   # hangs forever
+
+    eng.scan_once = scan_then_hang
+
+    async def go():
+        with mock.patch("kalshi_bot.engine.datetime") as dt:
+            dt.now.return_value = fixed_now()
+            await eng.startup()
+            try:
+                await eng.run(once=False)
+            finally:
+                await eng.close()
+
+    with pytest.raises(BotError, match="watchdog"):
+        asyncio.run(go())

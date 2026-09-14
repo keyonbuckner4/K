@@ -60,17 +60,30 @@ Save private keys as `*.pem` files so `.gitignore` covers them.
 ## Strategies (build order from the BRIEF)
 
 1. **Ladder arbitrage** (`ladder_arb`): exhaustive mutually-exclusive ladders whose YES asks sum
-   below $1 (buy all) or YES bids sum above $1 (sell all), nested-threshold monotonicity breaks,
-   crossed books. Every gap is logged to `arb_gaps` with its net edge, tradeable or not.
-2. **Weather** (`weather`): daily high/low ladders priced from NWS grid forecasts with a
-   lead-time-dependent error sigma. Verify each city's station against the market's
-   `rules_primary` (logged with every decision) before enabling `trade`.
+   below $1 (or bids above $1) after fees, threshold-ladder monotonicity, crossed books. Every gap
+   is logged to `arb_gaps` even when it does not clear fees.
+2. **Weather** (`weather`): daily high/low ladders for seven cities. Before the day starts the
+   settlement value is Normal(NWS point forecast, sigma) with sigma growing with lead time. Once
+   the day is under way the model is bounded by the station's own observations (a high cannot end
+   below what has already been measured), forecasts only the remaining hours from the NWS hourly
+   grid, and shrinks sigma as those hours run out. Trades on the current day are only proposed
+   before `today_candidates_until_local_hour` (11 AM local): after that the market's live read of
+   the day beats a forecast, so the model keeps pricing for the scorecard but proposes nothing.
+   This replaced the first version after its scorecard showed every afternoon "edge" was the model
+   not knowing what the market already knew.
 3. **Crypto thresholds** (`crypto`): BTC/ETH levels priced as barrier options from Kraken spot and
-   realized vol (or Deribit DVOL).
+   Deribit's DVOL implied-volatility index (realized vol only as a logged fallback).
 4. **Economics** (`economics`): normal consensus views you write in `config/econ_views.toml`.
 
-All strategies start in `mode = "observe"`. Flip one to `trade` in `config/bot.toml` only after
-its observe-only gate in the BRIEF is met.
+Every directional candidate also passes the gate's fifth rule: it must be priced strictly inside
+5c-95c. The bot never bets against a market that is already near certain; the first observe
+period showed those "edges" were model error, and such a market is right about 97% of the time.
+
+The observe-first rule applies to every strategy and every model change: it runs in `observe`
+mode until the scorecard (`bot backtest`, the dashboard) shows the model beating the market's
+prices on at least 20 contested settlements spread over several days, and the trade-time
+comparison ("at the moment it would have traded") agrees. Only then does that one strategy's
+`mode` switch to `trade`.
 
 ## What was verified and what was not
 
@@ -135,19 +148,20 @@ log as `model scoring failed` with a traceback.
 
 ## Roadmap (agreed with the operator)
 
-1. **Observe period, in progress.** `bot run --dashboard` started on demo on 2026-09-11 00:53 UTC with all
-   strategies in `observe`, reading production market data. Gates from the BRIEF: 48 h of ladder-gap logs
-   before `ladder_arb` may trade, 24 h of weather decisions before `weather` may.
-2. **Backtest review.** After the first settlements, `bot backtest` (Brier vs market, calibration, pessimistic
-   P&L) decides which strategy, if any, is switched to `trade` on demo. Caveats are printed first, by design.
-3. **Position manager (approved, build after step 2).** Take-profit / edge-gone / time-based exits for open
-   positions, using the existing reduce-only close path through the RiskEngine. Exit rules must compare the
-   locked-in value after a second taker fee against the model's expected value of holding. Ships observe-first
-   ("would sell" logged), then switched on in config, with tests.
-4. **Edge-threshold sweep (agreed).** After the observe period, score the logged decisions as if the gate's
-   minimum net edge had been 3c and 4c instead of 5c: trades per week and pessimistic P&L per threshold, from the
-   same settlements. The operator decides whether to lower `[gate] min_net_edge_cents` in BRIEF.md/config for
-   faster capital turnover. A trade quota is explicitly not on the table; frequency must come from edges.
-5. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
-6. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
+1. **Observe period 1, done (2026-09-11 to 2026-09-12).** Scorecard: 3,044 markets scored, 93 contested,
+   verdict "model does NOT beat the market" (Brier 0.1216 vs 0.0917), 32 would-be trades with 3 winners,
+   pessimistic P&L −$4.63. Cause: the weather model only knew the morning forecast while the market watched
+   the real temperature; the crypto model bet against near-certain strikes.
+2. **Model rewrite, built 2026-09-14 (this phase).** Weather: observation floor/cap, remaining-hours forecast,
+   morning trading window. Crypto: DVOL implied volatility. Gate: no bets against near-certain markets.
+   Scorecard: per-strategy table and the trade-time Brier comparison. Engine: watchdog restart on a hang.
+3. **Observe period 2, in progress.** Same scorecard, same bar: verdict green on at least 20 contested
+   settlements over several days AND "model knew better" at trade time, per strategy. Expect a week.
+4. **Position manager (approved, after step 3).** Take-profit / edge-gone / time-based exits for open
+   positions through the same reduce-only path, observe-first.
+5. **Edge-threshold sweep.** Only once a strategy's verdict is green: score the logged decisions as if the
+   gate's minimum net edge were 3c or 4c instead of 5c, and report trades per week and pessimistic P&L per
+   threshold. A lower threshold on a losing model only multiplies losing trades.
+6. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
+7. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
    venue; set `strategies.weather.nws_user_agent` to a real contact.

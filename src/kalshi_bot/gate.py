@@ -21,12 +21,17 @@ class GateConfig:
     max_spread_cents: Decimal = Decimal("3")
     min_depth_multiple: Decimal = Decimal("2")
     min_minutes_to_settlement: int = 10
+    # 5. a directional leg must not bet against a market that is already near certain: the first observe
+    # period showed every such "edge" was model error, and a market at 3c or 97c is right ~97% of the time.
+    min_market_price: Decimal = Decimal("0.05")
+    max_market_price: Decimal = Decimal("0.95")
 
     @classmethod
     def from_toml(cls, cfg: Mapping[str, Any] | None) -> "GateConfig":
         c = cfg or {}
         return cls(Decimal(str(c.get("min_net_edge_cents", 5))), Decimal(str(c.get("max_spread_cents", 3))),
-                   Decimal(str(c.get("min_depth_multiple", 2))), int(c.get("min_minutes_to_settlement", 10)))
+                   Decimal(str(c.get("min_depth_multiple", 2))), int(c.get("min_minutes_to_settlement", 10)),
+                   Decimal(str(c.get("min_market_price", "0.05"))), Decimal(str(c.get("max_market_price", "0.95"))))
 
 
 @dataclass
@@ -79,6 +84,10 @@ def check_leg(leg: Leg, book: OrderBook | None, market: Market | None, fee_sched
     d["available"] = str(avail)
     if avail < need:
         return GateResult(False, f"resting size {avail} at {leg.price} < {cfg.min_depth_multiple}x my {leg.count}", d)
+
+    # 5. near-certain market (directional legs only; arb legs are structural)
+    if not skip_edge and not (cfg.min_market_price < leg.price < cfg.max_market_price):
+        return GateResult(False, f"market at {leg.price} is near certain (outside {cfg.min_market_price}-{cfg.max_market_price}); not betting against it", d)
 
     # 1. net edge
     gross, fee, net = leg_edge_cents(leg, fee_sched, series)

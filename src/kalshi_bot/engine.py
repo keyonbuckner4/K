@@ -22,7 +22,7 @@ from .auth import KalshiSigner
 from .backtest import activity_stats, run_backtest, sync_results
 from .client import KalshiClient
 from .config import LIVE, Settings
-from .errors import ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
+from .errors import BotError, ApiError, ConfigError, DataUnavailable, UnexpectedApiResponse
 from .execution import OBSERVE, TRADE, Executor
 from .fees import FeeSchedule
 from .gate import GateConfig, check_intent
@@ -150,6 +150,11 @@ class Engine:
         self.score_interval = float(eng_cfg.get("score_interval_sec", 3600))
         self._last_score = 0.0
         self.stop = asyncio.Event()
+        # Watchdog: if no scan or scoring pass completes for this long, the run raises so the supervisor
+        # (Windows task, systemd) restarts the bot instead of letting a hung process look alive.
+        self.watchdog_sec = float(eng_cfg.get("watchdog_sec", 900))
+        self.last_progress = time.time()
+        self._watchdog_tripped: str | None = None
 
     # ---- lifecycle ------------------------------------------------------------------------------
     @property
@@ -387,6 +392,7 @@ class Engine:
         self.storage.set_state("last_backtest", card)
         self.storage.set_state("last_scoring_error", None)
         self._last_score = time.time()
+        self.last_progress = time.time()
         log.info("model scorecard: %d scored (%d contested), brier model=%s market=%s, %d candidates, pnl %sc (pessimistic), %d unresolved, "
                  "%d results synced; verdict: %s", rep.n_scored, rep.n_contested, f"{rep.brier_model:.4f}" if rep.brier_model is not None else "-",
                  f"{rep.brier_market:.4f}" if rep.brier_market is not None else "-", rep.n_candidates, rep.pnl_cents, rep.unresolved, synced, rep.verdict)
@@ -398,10 +404,34 @@ class Engine:
         return card
 
     # ---- loop ----------------------------------------------------------------------------------------
+    async def _watchdog(self, task: asyncio.Task) -> None:
+        while not self.stop.is_set():
+            await asyncio.sleep(min(30.0, max(1.0, self.watchdog_sec / 10)))
+            stalled = time.time() - self.last_progress
+            if stalled > self.watchdog_sec:
+                self._watchdog_tripped = f"no scan or scoring pass finished in {stalled:.0f}s (limit {self.watchdog_sec:.0f}s)"
+                log.critical("watchdog: %s; stopping so the supervisor restarts the bot", self._watchdog_tripped)
+                self.alerts.queue("critical", "bot hung; restarting", self._watchdog_tripped)
+                task.cancel()
+                return
+
     async def run(self, once: bool = False) -> ScanReport:
         rep = await self.scan_once()
+        self.last_progress = time.time()
         if once:
             return rep
+        watchdog = asyncio.create_task(self._watchdog(asyncio.current_task())) if self.watchdog_sec > 0 else None
+        try:
+            return await self._loop(rep)
+        except asyncio.CancelledError:
+            if self._watchdog_tripped:
+                raise BotError(f"watchdog: {self._watchdog_tripped}") from None
+            raise
+        finally:
+            if watchdog:
+                watchdog.cancel()
+
+    async def _loop(self, rep: ScanReport) -> ScanReport:
         while not self.stop.is_set():
             if time.time() - self._last_score >= self.score_interval:
                 try:
@@ -424,6 +454,7 @@ class Engine:
                 pass
             try:
                 rep = await self.scan_once()
+                self.last_progress = time.time()
             except UnexpectedApiResponse as e:
                 log.critical("STOPPING: API returned something undocumented: %s", e)
                 self.alerts.queue("critical", "engine stopped on unexpected API response", str(e)[:500])

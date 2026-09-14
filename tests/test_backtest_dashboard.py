@@ -245,6 +245,9 @@ def test_backtest_breaks_scores_down_by_strategy(tmp_path):
     assert by["weather"]["brier_model_contested"] > by["weather"]["brier_market_contested"]
     assert by["crypto"]["brier_model_contested"] < by["crypto"]["brier_market_contested"]
     assert by["crypto"]["n_candidates"] == 1 and by["crypto"]["hits"] == 1 and Decimal(by["crypto"]["pnl_cents"]) > 0
+    # at the moment of the trade the model said 0.70 against a 0.55 price and YES happened: the model knew better
+    assert abs(rep.brier_model_at_trade - 0.09) < 1e-9 and abs(rep.brier_market_at_trade - 0.2025) < 1e-9
+    assert "model knew better" in render_scorecard(rep.to_dict())
     assert "n_candidates" not in by["weather"]
     page = render_scorecard(rep.to_dict())
     assert "By strategy" in page and "<td>weather</td>" in page and "<td>crypto</td>" in page

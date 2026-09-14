@@ -53,3 +53,23 @@ def test_lognormal_barrier():
     assert prob_yes_lognormal(above, 0, 0.5, 1) is None
     between = market(ticker="R", strike_type="between", floor="99000", cap="101000")
     assert 0 < prob_yes_lognormal(between, 100000, 0.5, 1 / 365) < 1
+
+
+def test_bounded_extremes():
+    from kalshi_bot.pricing import prob_bounded_interval, prob_normal_interval
+
+    # a high already observed at 79: nothing below 79 can happen, buckets containing 79 collapse to "R stays below the top"
+    assert prob_bounded_interval(-INF, 75.5, 77.0, 2.0, floor=79.0) == 0.0
+    assert prob_bounded_interval(75.5, 77.5, 77.0, 2.0, floor=79.0) == 0.0
+    assert abs(prob_bounded_interval(77.5, 79.5, 77.0, 2.0, floor=79.0) - norm_cdf((79.5 - 77.0) / 2.0)) < 1e-12
+    assert abs(prob_bounded_interval(79.5, INF, 77.0, 2.0, floor=79.0) - (1 - norm_cdf((79.5 - 77.0) / 2.0))) < 1e-12
+    total = sum(prob_bounded_interval(a, b, 77.0, 2.0, floor=79.0) for a, b in [(-INF, 75.5), (75.5, 77.5), (77.5, 79.5), (79.5, INF)])
+    assert abs(total - 1.0) < 1e-12
+    # a low already observed at 60 is a cap: the mirror image
+    assert prob_bounded_interval(60.5, INF, 62.0, 2.0, cap=60.0) == 0.0
+    assert abs(prob_bounded_interval(58.5, 60.5, 62.0, 2.0, cap=60.0) - (1 - norm_cdf((58.5 - 62.0) / 2.0))) < 1e-12
+    assert abs(prob_bounded_interval(-INF, 58.5, 62.0, 2.0, cap=60.0) - norm_cdf((58.5 - 62.0) / 2.0)) < 1e-12
+    # no bound: plain normal
+    assert prob_bounded_interval(75.5, 77.5, 77.0, 2.0) == prob_normal_interval(75.5, 77.5, 77.0, 2.0)
+    m = market(strike_type="less_or_equal", floor=None, cap="75")
+    assert prob_yes_normal(m, 77.0, 2.0, integer_settlement=True, floor=79.0) == 0.0

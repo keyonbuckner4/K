@@ -161,7 +161,7 @@ def _s(v: Any) -> str | None:
 
 
 _NUMS = re.compile(r"-?\d+(?:\.\d+)?")
-THROTTLED_STAGES = ("model", "ladder")   # per-market model views: one row per material change, plus a heartbeat
+THROTTLED_STAGES = ("model", "ladder", "window")   # per-market model views: one row per material change, plus a heartbeat
 
 
 class LogThrottle:

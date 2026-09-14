@@ -55,10 +55,12 @@ class VolQuote:
 
 class CryptoFeed:
     def __init__(self, spot_source: str = "kraken", vol_source: str = "realized", window_hours: int = 72,
-                 transport: httpx.AsyncBaseTransport | None = None, cache_ttl: float = 60.0):
+                 transport: httpx.AsyncBaseTransport | None = None, cache_ttl: float = 60.0, fallback_realized: bool = True):
         self.spot_source = spot_source
         self.vol_source = vol_source
         self.window_hours = int(window_hours)
+        self.fallback_realized = fallback_realized
+        self._fallback_warned = 0.0
         self._http = httpx.AsyncClient(timeout=15.0, transport=transport, headers={"User-Agent": "kalshi-bot"})
         self._cache: dict[str, VolQuote] = {}
         self.cache_ttl = cache_ttl
@@ -121,7 +123,17 @@ class CryptoFeed:
             return c
         spot = await self.kraken_spot(asset)
         if self.vol_source == "deribit_dvol":
-            sigma, src = await self.deribit_dvol(asset), "kraken_spot+deribit_dvol"
+            try:
+                sigma, src = await self.deribit_dvol(asset), "kraken_spot+deribit_dvol"
+            except DataUnavailable as e:
+                if not self.fallback_realized:
+                    raise
+                now = time.time()
+                if now - self._fallback_warned > 3600:
+                    log.warning("Deribit DVOL unavailable (%s); using realized vol until it is back", e)
+                    self._fallback_warned = now
+                sigma, interval, hours = await self.kraken_realized_vol(asset)
+                src = f"kraken_spot+realized_{hours:.0f}h@{interval}m(dvol_fallback)"
         else:
             sigma, interval, hours = await self.kraken_realized_vol(asset)
             src = f"kraken_spot+realized_{hours:.0f}h@{interval}m"

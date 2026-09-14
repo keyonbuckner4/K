@@ -22,8 +22,9 @@ class CryptoThresholdStrategy(Strategy):
     def __init__(self, cfg: dict[str, Any], storage, feed: CryptoFeed | None = None):
         super().__init__(cfg, storage)
         self.series_map = {str(k).upper(): str(v) for k, v in (self.cfg.get("series") or {}).items()}
-        self.feed = feed or CryptoFeed(str(self.cfg.get("spot_source", "kraken")), str(self.cfg.get("vol_source", "realized")),
-                                       int(self.cfg.get("realized_vol_window_hours", 72)))
+        self.feed = feed or CryptoFeed(str(self.cfg.get("spot_source", "kraken")), str(self.cfg.get("vol_source", "deribit_dvol")),
+                                       int(self.cfg.get("realized_vol_window_hours", 72)),
+                                       fallback_realized=bool(self.cfg.get("vol_fallback_realized", True)))
         self.min_minutes = float(self.cfg.get("min_minutes_to_close", 20))
 
     def series(self) -> list[str]:

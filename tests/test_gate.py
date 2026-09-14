@@ -76,3 +76,23 @@ def test_arb_basket_checks_edge_at_basket_level():
     assert results[0].ok and not results[-1].ok and "basket net edge" in results[-1].reason
     it.expected_edge_cents = Decimal("6")
     assert all(r.ok for r in check_intent(it, {"KXHIGHNY-26SEP10-B70": book()}, fees(), NOW, CFG))
+
+
+def test_near_certain_market_is_never_bet_against():
+    # buying YES at 4c: the market says 96% NO; whatever the model thinks, the first observe period showed this loses
+    b = OrderBook.from_payload("KXHIGHNY-26SEP10-B70", {"orderbook_fp": {"yes_dollars": [["0.02", "100"]], "no_dollars": [["0.96", "100"]]}})
+    r = check_leg(leg(prob="0.30", price="0.04"), b, market(), fees(), NOW, CFG)
+    assert not r.ok and "near certain" in r.reason
+    # selling YES at 97c (buying NO at 3c) is the same bet from the other side
+    b = OrderBook.from_payload("KXHIGHNY-26SEP10-B70", {"orderbook_fp": {"yes_dollars": [["0.97", "100"]], "no_dollars": [["0.01", "100"]]}})
+    r = check_leg(leg(prob="0.70", price="0.97", side="ask"), b, market(), fees(), NOW, CFG)
+    assert not r.ok and "near certain" in r.reason
+    # inside the band the usual checks apply
+    r = check_leg(leg(prob="0.60", price="0.45"), book(), market(), fees(), NOW, CFG)
+    assert r.ok
+    # arb legs are structural, not a view against the market: the rule does not apply to them
+    arb_leg = Leg("KXHIGHNY-26SEP10-B70", "bid", Decimal("0.04"), 5, market=market(), model_prob=None)
+    r = check_leg(arb_leg, OrderBook.from_payload("KXHIGHNY-26SEP10-B70", {"orderbook_fp": {"yes_dollars": [["0.02", "100"]], "no_dollars": [["0.96", "100"]]}}),
+                  market(), fees(), NOW, CFG, skip_edge=True)
+    assert r.ok
+    assert GateConfig.from_toml({"min_market_price": "0.10", "max_market_price": "0.90"}).max_market_price == Decimal("0.90")

@@ -49,6 +49,8 @@ class BacktestReport:
     pnl_cents: Decimal = Decimal("0")
     pnl_by_strategy: dict[str, Decimal] = field(default_factory=dict)
     hit_rate: float | None = None
+    brier_model_at_trade: float | None = None    # over the candidates: model vs market price at the moment it would have traded
+    brier_market_at_trade: float | None = None
     unresolved: int = 0
     caveats: list[str] = field(default_factory=list)
     by_strategy: dict[str, dict[str, Any]] = field(default_factory=dict)   # the same scores, per strategy
@@ -60,6 +62,7 @@ class BacktestReport:
                 "verdict": self.verdict,
                 "calibration": self.calibration, "n_candidates": self.n_candidates, "pnl_cents": str(self.pnl_cents),
                 "pnl_by_strategy": {k: str(v) for k, v in self.pnl_by_strategy.items()}, "hit_rate": self.hit_rate,
+                "brier_model_at_trade": self.brier_model_at_trade, "brier_market_at_trade": self.brier_market_at_trade,
                 "unresolved": self.unresolved, "caveats": self.caveats, "by_strategy": self.by_strategy}
 
 
@@ -144,6 +147,7 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
     latest_c = {r["market_ticker"]: r for r in storage.latest_candidate_decisions(since) if r["book_side"] in ("bid", "ask") and r["count"]}
     results.update(storage.market_results(set(latest_c) - set(results)))
     hits = 0
+    bm_t = bk_t = 0.0
     for r in latest_c.values():
         y = results.get(r["market_ticker"])
         if y not in ("yes", "no"):
@@ -152,6 +156,9 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
         price = Decimal(r["price"])
         count = int(Decimal(r["count"]))
         yv = Decimal(1 if y == "yes" else 0)
+        if r["model_prob"]:
+            bm_t += (float(r["model_prob"]) - float(yv)) ** 2
+            bk_t += (float(price) - float(yv)) ** 2
         if r["book_side"] == "bid":
             fill = min(price + TICK, Decimal("0.99"))
             gross = (yv - fill) * count
@@ -169,6 +176,9 @@ def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Dec
             hits += 1
             st["hits"] = st.get("hits", 0) + 1
     rep.hit_rate = hits / rep.n_candidates if rep.n_candidates else None
+    if rep.n_candidates:
+        rep.brier_model_at_trade = bm_t / rep.n_candidates
+        rep.brier_market_at_trade = bk_t / rep.n_candidates
     rep.caveats = caveats(rep)
     return rep
 
@@ -202,6 +212,10 @@ def caveats(rep: BacktestReport) -> list[str]:
         "Fees are scored with the general 0.07 multiplier; series with maker fees or special multipliers differ.",
         "A positive P&L over a few days is consistent with pure luck; require Brier(model) < Brier(market) over hundreds of independent events before believing an edge.",
     ]
+    if rep.n_candidates and rep.brier_model_at_trade is not None and rep.brier_market_at_trade is not None \
+            and rep.brier_model_at_trade >= rep.brier_market_at_trade:
+        out.insert(0, f"At the moments it would have traded, the model's Brier ({rep.brier_model_at_trade:.4f}) is NOT better than the price it "
+                      f"traded against ({rep.brier_market_at_trade:.4f}) over {rep.n_candidates} candidates: the trades themselves carry no edge.")
     if rep.n_contested >= MIN_CONTESTED and rep.brier_model_contested is not None and rep.brier_market_contested is not None \
             and rep.brier_model_contested >= rep.brier_market_contested:
         out.insert(0, "On contested markets the model's Brier score is NOT better than the market's own prices. Any positive P&L here is noise, not edge.")

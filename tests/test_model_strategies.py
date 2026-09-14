@@ -35,12 +35,21 @@ def book(ticker, bid, ask, qty="100"):
 
 # ---- NWS -------------------------------------------------------------------------------------
 NWS_POINTS = {"properties": {"gridId": "OKX", "gridX": 33, "gridY": 37, "timeZone": "America/New_York"}}
+# hourly forecast (Celsius) for Sep 10 local 06:00-23:00 (10:00Z-03:00Z) peaking at 25C mid-afternoon, and Sep 11 peaking at 28C
+_HOURLY = [(f"2026-09-10T{h:02d}:00:00+00:00", c) for h, c in zip(range(10, 24), [18, 19, 20, 21, 22, 23, 24, 25, 25, 24, 23, 22, 21, 20])]
+_HOURLY += [(f"2026-09-11T{h:02d}:00:00+00:00", c) for h, c in zip(range(0, 4), [19, 18, 18, 17])]
+_HOURLY += [(f"2026-09-11T{h:02d}:00:00+00:00", c) for h, c in zip(range(10, 24), [19, 20, 22, 24, 26, 27, 28, 28, 27, 26, 24, 23, 22, 21])]
 NWS_GRID = {"properties": {
     "updateTime": "2026-09-10T10:00:00+00:00",
+    "temperature": {"values": [{"validTime": f"{t}/PT1H", "value": c} for t, c in _HOURLY]},
     "maxTemperature": {"values": [{"validTime": "2026-09-10T11:00:00+00:00/PT13H", "value": 25.0}, {"validTime": "2026-09-11T11:00:00+00:00/PT13H", "value": 28.0}]},
     "minTemperature": {"values": [{"validTime": "2026-09-10T23:00:00+00:00/PT14H", "value": 15.0}]},
     "probabilityOfPrecipitation": {"values": [{"validTime": "2026-09-10T12:00:00+00:00/PT6H", "value": 40}]},
 }}
+# station observations on Sep 10 (UTC timestamps; 09:51Z is 05:51 EDT): the morning climbs to 23C = 73.4F by 08:51 local
+NWS_OBS = {"features": [{"properties": {"timestamp": f"2026-09-10T{h:02d}:51:00+00:00", "temperature": {"value": c}}}
+                        for h, c in [(9, 20.0), (10, 21.0), (11, 22.0), (12, 23.0)]]
+           + [{"properties": {"timestamp": "2026-09-10T08:51:00+00:00", "temperature": {"value": None}}}]}
 
 
 def nws_handler(req: httpx.Request):
@@ -49,6 +58,8 @@ def nws_handler(req: httpx.Request):
         return httpx.Response(200, json=NWS_POINTS)
     if req.url.path.startswith("/gridpoints/OKX/33,37"):
         return httpx.Response(200, json=NWS_GRID)
+    if req.url.path == "/stations/KNYC/observations":
+        return httpx.Response(200, json=NWS_OBS)
     return httpx.Response(404)
 
 
@@ -91,7 +102,7 @@ def test_weather_strategy_prices_ladder_and_emits_edge(tmp_path):
     nws = NWSClient("t", transport=httpx.MockTransport(nws_handler))
     strat = WeatherStrategy(weather_cfg(), storage, nws=nws)
     assert set(strat.series()) == {"KXHIGHNY", "KXLOWNY"}
-    c = ScanContext(NOW, [ev], books, fees("KXHIGHNY"), GateConfig(), storage)
+    c = ScanContext(NOW - timedelta(hours=2), [ev], books, fees("KXHIGHNY"), GateConfig(), storage)   # 09:00 local: inside the trading window
     intents = asyncio.run(strat.scan(c))
     tickers = {i.legs[0].ticker: i for i in intents}
     assert "KXHIGHNY-26SEP10-B76" in tickers
@@ -102,6 +113,65 @@ def test_weather_strategy_prices_ladder_and_emits_edge(tmp_path):
     rows = storage.decisions(strategy="weather")
     assert {r["market_ticker"] for r in rows if r["model_prob"]} == {m.ticker for m in ms}
     assert storage.conn.execute("SELECT count(*) FROM forecasts").fetchone()[0] == 1
+    fc = json.loads(storage.conn.execute("SELECT payload FROM forecasts").fetchone()[0])
+    assert fc["floor_f"] == 73.0 and fc["hours_left"] == 14 and fc["candidates_allowed"] is True and abs(fc["mean_f"] - 77.0) < 1e-9
+
+
+def test_weather_afternoon_uses_observed_floor_and_suppresses_candidates(tmp_path):
+    """At 15:00 local the station has already hit 79F: buckets below 79 are impossible, the top of the
+    ladder is priced from the remaining hours, and no trade is proposed after the morning window."""
+    hot_obs = {"features": [{"properties": {"timestamp": f"2026-09-10T{h:02d}:51:00+00:00", "temperature": {"value": c}}}
+                            for h, c in [(12, 23.0), (15, 25.0), (17, 26.1), (18, 25.5)]]}   # 26.1C = 79.0F at 13:51 local
+
+    def handler(req: httpx.Request):
+        if req.url.path == "/stations/KNYC/observations":
+            return httpx.Response(200, json=hot_obs)
+        return nws_handler(req)
+
+    ms = [market(ticker="KXHIGHNY-26SEP10-T75", strike_type="less_or_equal", floor=None, cap="75", yes_bid="0.03", yes_ask="0.05"),
+          market(ticker="KXHIGHNY-26SEP10-B76", strike_type="between", floor="76", cap="77", yes_bid="0.10", yes_ask="0.12"),
+          market(ticker="KXHIGHNY-26SEP10-B78", strike_type="between", floor="78", cap="79", yes_bid="0.60", yes_ask="0.62"),
+          market(ticker="KXHIGHNY-26SEP10-T80", strike_type="greater_or_equal", floor="80", cap=None, yes_bid="0.20", yes_ask="0.22")]
+    ev = Event.parse({"event_ticker": "KXHIGHNY-26SEP10", "series_ticker": "KXHIGHNY", "mutually_exclusive": True, "category": "Climate and Weather",
+                      "markets": [m.raw for m in ms]})
+    books = {m.ticker: book(m.ticker, m.raw["yes_bid_dollars"], m.raw["yes_ask_dollars"]) for m in ms}
+    storage = Storage(tmp_path / "x.db")
+    strat = WeatherStrategy(weather_cfg(), storage, nws=NWSClient("t", transport=httpx.MockTransport(handler)))
+    c = ScanContext(NOW + timedelta(hours=4), [ev], books, fees("KXHIGHNY"), GateConfig(), storage)   # 15:00 local
+    intents = asyncio.run(strat.scan(c))
+    assert intents == []   # after the morning window nothing is proposed, even though the 76-77 bucket at 12c is "free money" for the model
+    rows = {r["market_ticker"]: r for r in storage.decisions(strategy="weather") if r["stage"] == "model"}
+    assert Decimal(rows["KXHIGHNY-26SEP10-T75"]["model_prob"]) == 0 and Decimal(rows["KXHIGHNY-26SEP10-B76"]["model_prob"]) == 0
+    p78 = float(rows["KXHIGHNY-26SEP10-B78"]["model_prob"])
+    p80 = float(rows["KXHIGHNY-26SEP10-T80"]["model_prob"])
+    assert abs(p78 + p80 - 1.0) < 1e-6 and p78 > 0.6 and p80 > 0.2   # at least 79; one more degree stays possible (reporting noise)
+    suppressed = [r for r in storage.decisions(strategy="weather") if r["stage"] == "window"]
+    assert suppressed and "suppressed" in suppressed[0]["reason"]
+    fc = json.loads(storage.conn.execute("SELECT payload FROM forecasts").fetchone()[0])
+    assert fc["floor_f"] == 79.0 and fc["candidates_allowed"] is False and fc["hours_left"] == 8
+
+
+def test_weather_future_day_uses_the_plain_forecast(tmp_path):
+    ms = [market(ticker="KXHIGHNY-26SEP11-B82", strike_type="between", floor="82", cap="83", yes_bid="0.20", yes_ask="0.22")]
+    ev = Event.parse({"event_ticker": "KXHIGHNY-26SEP11", "series_ticker": "KXHIGHNY", "mutually_exclusive": True, "markets": [m.raw for m in ms]})
+    books = {m.ticker: book(m.ticker, "0.20", "0.22") for m in ms}
+    storage = Storage(tmp_path / "x.db")
+    strat = WeatherStrategy(weather_cfg(), storage, nws=NWSClient("t", transport=httpx.MockTransport(nws_handler)))
+    intents = asyncio.run(strat.scan(ScanContext(NOW, [ev], books, fees("KXHIGHNY"), GateConfig(), storage)))
+    assert intents and intents[0].legs[0].book_side == "bid"   # forecast 82.4F: the 82-83 bucket at 22c is cheap
+    fc = json.loads(storage.conn.execute("SELECT payload FROM forecasts").fetchone()[0])
+    assert fc["floor_f"] is None and fc["cap_f"] is None and fc["candidates_allowed"] is True and fc["sigma_f"] > 2.0
+
+
+def test_local_standard_day_ignores_daylight_saving():
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from kalshi_bot.data.nws import local_standard_day
+
+    tz = ZoneInfo("America/New_York")
+    assert local_standard_day(datetime(2026, 9, 11, 4, 30, tzinfo=timezone.utc), tz) == "2026-09-10"   # 00:30 EDT is still Sep 10 in EST
+    assert local_standard_day(datetime(2026, 9, 11, 5, 30, tzinfo=timezone.utc), tz) == "2026-09-11"
 
 
 def test_weather_without_forecast_rejects_not_guesses(tmp_path):
@@ -151,6 +221,22 @@ def test_realized_vol_refuses_a_truncated_window():
     feed = CryptoFeed(transport=httpx.MockTransport(short_handler), window_hours=72)
     with pytest.raises(DataUnavailable, match="under half"):
         asyncio.run(feed.quote("BTC"))
+
+
+def test_crypto_feed_prefers_dvol_and_falls_back_to_realized(caplog):
+    def with_deribit(status):
+        def handler(req: httpx.Request):
+            if req.url.host == "www.deribit.com":
+                return httpx.Response(status, json={"result": {"index_price": 55.0}} if status == 200 else {})
+            return kraken_handler(req)
+        return handler
+
+    q = asyncio.run(CryptoFeed(vol_source="deribit_dvol", transport=httpx.MockTransport(with_deribit(200))).quote("BTC"))
+    assert q.sigma_annual == 0.55 and q.source == "kraken_spot+deribit_dvol"
+    q2 = asyncio.run(CryptoFeed(vol_source="deribit_dvol", transport=httpx.MockTransport(with_deribit(503))).quote("BTC"))
+    assert "dvol_fallback" in q2.source and q2.sigma_annual > 0 and "Deribit DVOL unavailable" in caplog.text
+    with pytest.raises(DataUnavailable):
+        asyncio.run(CryptoFeed(vol_source="deribit_dvol", fallback_realized=False, transport=httpx.MockTransport(with_deribit(503))).quote("BTC"))
 
 
 def test_crypto_strategy_prices_thresholds(tmp_path):

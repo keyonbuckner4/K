@@ -85,12 +85,16 @@ def render_scorecard(card: dict[str, Any] | None, error: dict[str, Any] | None =
     by_table = ("<p>By strategy (contested markets only for the Brier columns):</p><table><tr><th>strategy</th><th>scored</th><th>contested</th>"
                 "<th>Brier model</th><th>Brier market</th><th>candidates</th><th>winners</th><th>pessimistic P&amp;L (c)</th></tr>"
                 f"{by_rows}</table>") if by_rows else ""
-    return (warn + activity + f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
-            f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>"
-            f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
-            + by_table +
-            f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
-            f"<p>What would make this wrong:</p><ul>{caveats}</ul>")
+    at_trade = ""
+    if card.get("brier_model_at_trade") is not None:
+        bm, bk = float(card["brier_model_at_trade"]), float(card["brier_market_at_trade"])
+        at_trade = (f"<p>At the moment it would have traded ({card.get('n_candidates')} candidates): Brier model {bm:.4f} vs market {bk:.4f} "
+                    f"<b class='{'ok' if bm < bk else 'bad'}'>{'model knew better' if bm < bk else 'the price knew better'}</b>.</p>")
+    summary = (f"<p>Last scored {when}. Scored markets: {card.get('n_scored')} (contested: {card.get('n_contested', 0)}), unresolved: {card.get('unresolved')}, "
+               f"candidates: {card.get('n_candidates')}, pessimistic P&amp;L: {card.get('pnl_cents')}c, hit rate: {card.get('hit_rate')}.</p>")
+    verdict_line = f"<p><b class='{'ok' if good else 'bad'}'>{html.escape(verdict)}</b></p>"
+    cal_table = f"<table><tr><th>model prob</th><th>n</th><th>mean p</th><th>realized</th></tr>{cal}</table>"
+    return warn + activity + summary + at_trade + verdict_line + by_table + cal_table + f"<p>What would make this wrong:</p><ul>{caveats}</ul>"
 
 
 def render_bot_line(payload: dict[str, Any]) -> str:

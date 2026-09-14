@@ -47,6 +47,10 @@ min_net_edge_cents = 5
 max_spread_cents = 3
 min_depth_multiple = 2
 min_minutes_to_settlement = 10
+# 5. never bet against a market that is already near certain: a directional leg must be priced strictly
+# inside this band. The first observe period showed every such "edge" was model error.
+min_market_price = 0.05
+max_market_price = 0.95
 
 [engine]
 # Where market data (events, books, series) is read from: "auto" reads production's public
@@ -55,6 +59,7 @@ min_minutes_to_settlement = 10
 market_data = "auto"
 scan_interval_sec = 30
 score_interval_sec = 3600        # how often `bot run` syncs settlements and re-scores the models for the dashboard
+watchdog_sec = 900               # no scan or scoring pass finished for this long -> exit so the supervisor restarts the bot
 series_cache_ttl_sec = 21600
 market_cache_ttl_sec = 20
 positions_cache_ttl_sec = 5
@@ -90,6 +95,15 @@ max_contracts = 5
 # sigma = sigma_f_day0 + sigma_f_per_day * lead_days. NWS day-1 high MAE is roughly 2-3 F.
 sigma_f_day0 = 2.3
 sigma_f_per_day = 0.7
+# Once the day is under way the model is bounded by the station's observations (the high cannot end below
+# what has been seen) and forecasts only the remaining hours; sigma shrinks from sigma_f_day0 towards
+# sigma_f_min as the remaining forecast hours fall below sigma_full_after_hours.
+use_observations = true
+sigma_f_min = 1.0
+sigma_full_after_hours = 8
+# Trades on the current day's markets are only proposed before this local hour; later the market's live
+# read of the day beats a forecast. Pricing continues all day for the scorecard.
+today_candidates_until_local_hour = 11
 nws_user_agent = "kalshi-bot (set your email in config)"
 
 # Each city: Kalshi series tickers, the NWS station the market settles on, and its coordinates.
@@ -156,7 +170,8 @@ mode = "observe"
 max_contracts = 5
 series = { BTC = "KXBTCD", ETH = "KXETHD" }
 spot_source = "kraken"           # public, no key: https://api.kraken.com/0/public/Ticker
-vol_source = "realized"          # realized (Kraken 1-minute candles) | deribit_dvol
+vol_source = "deribit_dvol"      # deribit_dvol (30-day implied volatility index) | realized (Kraken candles)
+vol_fallback_realized = true     # if Deribit is unreachable, use realized vol and say so in the log and the decision's source
 realized_vol_window_hours = 72
 min_minutes_to_close = 20        # very short horizons make the barrier model fragile
 

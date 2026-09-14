@@ -1,9 +1,12 @@
-"""NOAA / National Weather Service forecasts (api.weather.gov, free, no key; User-Agent required).
+"""NOAA / National Weather Service forecasts and observations (api.weather.gov, free, no key;
+User-Agent required).
 
 ``/points/{lat},{lon}`` resolves the forecast office grid, ``/gridpoints/{wfo}/{x},{y}`` returns
-the raw numeric forecast: ``maxTemperature`` / ``minTemperature`` in Celsius with ISO-8601
-``validTime`` periods, ``probabilityOfPrecipitation`` in percent. The bot converts to Fahrenheit
-and keys values by the local calendar date at the station.
+the raw numeric forecast: ``maxTemperature`` / ``minTemperature`` and the hourly ``temperature``
+in Celsius with ISO-8601 ``validTime`` periods, ``probabilityOfPrecipitation`` in percent.
+``/stations/{id}/observations`` returns the station's recent observations (Celsius). The bot
+converts to Fahrenheit and keys values by the station's local calendar date; observations are
+bucketed by the local *standard*-time day, which is the climate day the daily climate report uses.
 """
 
 from __future__ import annotations
@@ -11,8 +14,8 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -44,6 +47,23 @@ class DailyForecast:
     low_f: float | None
     pop: float | None    # probability of precipitation, 0..1 (max over the day)
     issued: datetime | None
+    hourly_f: list[tuple[datetime, float]] = field(default_factory=list)   # (local time, F) forecast temperatures on this date
+
+
+@dataclass
+class ObservedExtremes:
+    station: str
+    date: str                 # local standard-time climate day
+    max_f: float | None
+    min_f: float | None
+    n_obs: int
+    latest: datetime | None   # timestamp of the newest observation used
+
+
+def local_standard_day(dt: datetime, tz: ZoneInfo) -> str:
+    """Calendar date in local standard time (the NWS climate day), ignoring daylight saving."""
+    local = dt.astimezone(tz)
+    return (local - (local.dst() or timedelta(0))).date().isoformat()
 
 
 class NWSClient:
@@ -54,7 +74,9 @@ class NWSClient:
                                        headers={"User-Agent": user_agent or "kalshi-bot", "Accept": "application/geo+json"})
         self._points: dict[str, dict[str, Any]] = {}
         self._grid: dict[str, tuple[float, dict[str, DailyForecast]]] = {}
+        self._obs: dict[str, tuple[float, list[tuple[datetime, float]]]] = {}
         self.cache_ttl = cache_ttl
+        self.obs_cache_ttl = min(300.0, cache_ttl)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -110,6 +132,12 @@ class NWSClient:
                 out[date] = DailyForecast(date, None, None, None, issued_dt)
             return out[date]
 
+        for start, dur, c in _values("temperature"):
+            # hourly values; a value with a longer duration is repeated for each hour it covers
+            hours = max(1, int(dur.total_seconds() // 3600))
+            for h in range(hours):
+                local = (start + timedelta(hours=h)).astimezone(tz)
+                _ensure(local.date().isoformat()).hourly_f.append((local, c_to_f(c)))
         for start, dur, c in _values("maxTemperature"):
             mid = (start + dur / 2).astimezone(tz)
             fc = _ensure(mid.date().isoformat())
@@ -123,7 +151,38 @@ class NWSClient:
             fc = _ensure(local.date().isoformat())
             p = pct / 100.0
             fc.pop = p if fc.pop is None else max(fc.pop, p)
-        if not out:
+        if not out or not any(fc.high_f is not None or fc.low_f is not None for fc in out.values()):
             raise DataUnavailable(f"NWS grid for {key} has no temperature values")
         self._grid[key] = (time.time(), out)
         return out
+
+    async def timezone(self, lat: float, lon: float) -> ZoneInfo:
+        props = await self.points(lat, lon)
+        return ZoneInfo(props.get("timeZone") or "America/New_York")
+
+    async def observations(self, station: str, hours: float = 30.0) -> list[tuple[datetime, float]]:
+        """(timestamp UTC, temperature F) for the station's observations over the last ``hours``, oldest first.
+        Observations without a temperature are skipped."""
+        cached = self._obs.get(station)
+        if cached and time.time() - cached[0] < self.obs_cache_ttl:
+            return cached[1]
+        start = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0)
+        data = await self._get(f"/stations/{station}/observations?start={start.isoformat().replace('+00:00', 'Z')}&limit=500")
+        out: list[tuple[datetime, float]] = []
+        for f in data.get("features") or []:
+            props = f.get("properties") or {}
+            temp = (props.get("temperature") or {}).get("value")
+            ts = props.get("timestamp")
+            if temp is None or not ts:
+                continue
+            out.append((datetime.fromisoformat(str(ts).replace("Z", "+00:00")), c_to_f(float(temp))))
+        out.sort()
+        self._obs[station] = (time.time(), out)
+        return out
+
+    async def observed_extremes(self, station: str, date: str, tz: ZoneInfo) -> ObservedExtremes:
+        """Highest and lowest temperature observed so far on the local standard-time day ``date``."""
+        obs = [(ts, f) for ts, f in await self.observations(station) if local_standard_day(ts, tz) == date]
+        temps = [f for _, f in obs]
+        return ObservedExtremes(station, date, max(temps) if temps else None, min(temps) if temps else None, len(obs),
+                                max(ts for ts, _ in obs) if obs else None)
