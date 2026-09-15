@@ -42,6 +42,30 @@ maker_multiplier = 0.0175        # applied only on series whose fee_type is quad
 # series_overrides = { KXEXAMPLE = 0.07 }        # force a taker multiplier for a series
 # flat_fee_per_contract = { KXEXAMPLE = 0.01 }   # required for any series with fee_type = "flat"
 
+# Risk limits, every fraction measured against account equity (0.01 = 1%). These are the numbers
+# from BRIEF.md. They form a ladder and the bot refuses to start if it is incoherent, because a
+# losing event contract settles at zero: a losing position loses ALL of its cost, so "one position
+# fully lost" is the ordinary result of a bad trade, not a tail case.
+#
+#   max_position_fraction MUST stay below max_drawdown_fraction, or the first losing trade is a
+#   drawdown big enough to trip the full stop, which halts the bot permanently until you run
+#   `bot resume --full-stop`. At 15% position with a 10% full stop, the bot places one trade,
+#   loses it, and never trades again.
+#   max_position_fraction MUST stay below max_daily_loss_fraction, or one loss ends each day.
+#
+# On $100: 1% is a $1 position, the daily halt is $3, the weekly halt is $6, the full stop is $10.
+# Raising the position size does not create edge, it multiplies whatever edge exists, including a
+# negative one. Raise it only alongside the halts, and only once the scorecard says the edge is real.
+[risk]
+max_position_fraction = 0.01
+max_daily_loss_fraction = 0.03
+max_weekly_loss_fraction = 0.06
+max_drawdown_fraction = 0.10
+max_open_positions = 5
+max_positions_per_event = 2
+live_probation_cap_dollars = 25
+live_probation_days = 30
+
 [gate]
 min_net_edge_cents = 5
 max_spread_cents = 3

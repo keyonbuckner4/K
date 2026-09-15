@@ -27,7 +27,7 @@ from typing import Any, Callable
 from .account import AccountSnapshot
 from .alerts import Alerts
 from .config import Settings
-from .errors import Halted, RiskRejected
+from .errors import ConfigError, Halted, RiskRejected
 from .halt import halt_active
 from .intent import CLOSE, Intent
 from .storage import Storage
@@ -55,6 +55,73 @@ class RiskLimits:
     live_probation_days: int = 30
     live_probation_cap_cents: int = 2500
     blocked_categories: tuple[str, ...] = ("sport", "politic", "election", "culture", "entertainment")
+
+    def validate(self) -> "RiskLimits":
+        """Refuse a ladder that cannot survive its own first loss.
+
+        Event contracts are binary: a losing YES contract settles at zero, so a losing position
+        loses all of its cost. That makes "one position, fully lost" the ordinary outcome of a bad
+        trade, not a tail case. If a single position is allowed to be as large as a halt threshold,
+        the first loss trips that halt, and in the case of the drawdown limit the stop is permanent
+        and needs a manual `bot resume --full-stop`. A bot that takes one trade and stops is not
+        aggressive, it is broken, so an incoherent ladder is a config error rather than a surprise
+        on the day it happens.
+        """
+        fractions = {"max_position_fraction": self.max_position_fraction, "max_daily_loss_fraction": self.max_daily_loss_fraction,
+                     "max_weekly_loss_fraction": self.max_weekly_loss_fraction, "max_drawdown_fraction": self.max_drawdown_fraction}
+        for name, v in fractions.items():
+            if not (Decimal("0") < v <= Decimal("1")):
+                raise ConfigError(f"[risk] {name} = {v} must be greater than 0 and at most 1 (it is a fraction of equity, so 0.15 means 15%)")
+        pos = self.max_position_fraction
+        if pos >= self.max_drawdown_fraction:
+            raise ConfigError(
+                f"[risk] max_position_fraction {pos:.2%} is not below max_drawdown_fraction {self.max_drawdown_fraction:.2%}. "
+                f"A losing binary contract loses the whole position, so the first loss would be a {pos:.2%} drawdown and trip "
+                f"the full stop, which halts the bot permanently until `bot resume --full-stop`. Raise max_drawdown_fraction "
+                f"above {pos:.2%} if that is really the risk you want to carry, or lower max_position_fraction.")
+        if pos >= self.max_daily_loss_fraction:
+            raise ConfigError(
+                f"[risk] max_position_fraction {pos:.2%} is not below max_daily_loss_fraction {self.max_daily_loss_fraction:.2%}. "
+                f"The first losing trade would trip the daily halt, so the bot could never place a second trade in a day.")
+        if self.max_daily_loss_fraction > self.max_weekly_loss_fraction:
+            raise ConfigError(f"[risk] max_daily_loss_fraction {self.max_daily_loss_fraction:.2%} exceeds max_weekly_loss_fraction "
+                              f"{self.max_weekly_loss_fraction:.2%}; the weekly limit would never be the binding one")
+        if self.max_open_positions < 1 or self.max_positions_per_event < 1:
+            raise ConfigError("[risk] max_open_positions and max_positions_per_event must be at least 1")
+        if self.max_positions_per_event > self.max_open_positions:
+            raise ConfigError(f"[risk] max_positions_per_event {self.max_positions_per_event} exceeds max_open_positions {self.max_open_positions}")
+        if self.live_probation_cap_cents < 0 or self.live_probation_days < 0:
+            raise ConfigError("[risk] live probation settings cannot be negative")
+        return self
+
+    def describe(self) -> dict[str, Any]:
+        return {"max_position": f"{self.max_position_fraction:.2%}", "daily_halt": f"{self.max_daily_loss_fraction:.2%}",
+                "weekly_halt": f"{self.max_weekly_loss_fraction:.2%}", "full_stop_drawdown": f"{self.max_drawdown_fraction:.2%}",
+                "max_open_positions": self.max_open_positions, "max_per_event": self.max_positions_per_event,
+                "live_probation": f"${self.live_probation_cap_cents / 100:.0f} for {self.live_probation_days} days"}
+
+    @classmethod
+    def from_toml(cls, cfg: Any | None) -> "RiskLimits":
+        """Build from a ``[risk]`` table. Every key is optional and falls back to the BRIEF.md default."""
+        c = dict(cfg or {})
+        d = cls()
+
+        def frac(name: str, default: Decimal) -> Decimal:
+            return Decimal(str(c[name])) if name in c else default
+
+        cap_dollars = c.get("live_probation_cap_dollars")
+        return cls(
+            max_position_fraction=frac("max_position_fraction", d.max_position_fraction),
+            max_daily_loss_fraction=frac("max_daily_loss_fraction", d.max_daily_loss_fraction),
+            max_weekly_loss_fraction=frac("max_weekly_loss_fraction", d.max_weekly_loss_fraction),
+            max_drawdown_fraction=frac("max_drawdown_fraction", d.max_drawdown_fraction),
+            max_open_positions=int(c.get("max_open_positions", d.max_open_positions)),
+            max_positions_per_event=int(c.get("max_positions_per_event", d.max_positions_per_event)),
+            min_minutes_to_settlement=int(c.get("min_minutes_to_settlement", d.min_minutes_to_settlement)),
+            live_probation_days=int(c.get("live_probation_days", d.live_probation_days)),
+            live_probation_cap_cents=int(Decimal(str(cap_dollars)) * 100) if cap_dollars is not None else d.live_probation_cap_cents,
+            blocked_categories=d.blocked_categories,
+        ).validate()
 
 
 LIMITS = RiskLimits()
@@ -269,7 +336,7 @@ class RiskEngine:
             notes.append("reduce-only intent: size and count limits waived")
             return Approval(intent, 0, equity, cap, notes)
 
-        # 5. Position size: 1% of equity, and the $25 probation cap for the first 30 live days.
+        # 5. Position size: max_position_fraction of equity, and the probation cap for the first live days.
         if self.settings.is_live:
             first = self._get("live_first_trade_ts")
             first_dt = datetime.fromtimestamp(first, tz=timezone.utc) if first else now
@@ -277,7 +344,7 @@ class RiskEngine:
                 cap = min(cap, self.limits.live_probation_cap_cents)
                 notes.append(f"live probation cap ${self.limits.live_probation_cap_cents / 100:.0f}")
         if cap <= 0:
-            raise RiskRejected(f"equity {equity}c allows no position (1% cap = {cap}c)")
+            raise RiskRejected(f"equity {equity}c allows no position ({self.limits.max_position_fraction:.2%} cap = {cap}c)")
         if cost > cap:
             raise RiskRejected(f"cost {cost}c exceeds per-position cap {cap}c (equity {equity}c)")
         if cost > snapshot.balance_cents:

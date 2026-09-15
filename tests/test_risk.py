@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from kalshi_bot import halt
-from kalshi_bot.errors import Halted, RiskRejected
+from kalshi_bot.errors import ConfigError, Halted, RiskRejected
 from kalshi_bot.intent import ARB, Intent, Leg
 from kalshi_bot.risk import RiskEngine, day_key, week_key
 from kalshi_bot.storage import Storage
@@ -171,3 +171,63 @@ def test_status_reports_state(tmp_path):
     e.refresh(snapshot(), NOW)
     st = e.status()
     assert st["day_key"] == "2026-09-10" and st["halt_file"] is False and st["peak_equity_cents"] == 100_000
+
+
+# ---- configurable limits ---------------------------------------------------------------------
+def test_risk_limits_read_from_config_and_the_position_cap_follows():
+    from kalshi_bot.risk import RiskLimits
+
+    d = RiskLimits.from_toml(None)
+    assert d.max_position_fraction == Decimal("0.01") and d.live_probation_cap_cents == 2500
+
+    lim = RiskLimits.from_toml({"max_position_fraction": 0.05, "max_daily_loss_fraction": 0.15,
+                                "max_weekly_loss_fraction": 0.25, "max_drawdown_fraction": 0.40,
+                                "live_probation_cap_dollars": 50, "max_open_positions": 8, "max_positions_per_event": 3})
+    assert lim.max_position_fraction == Decimal("0.05") and lim.live_probation_cap_cents == 5000
+    assert lim.max_open_positions == 8 and "5.00%" in lim.describe()["max_position"]
+
+
+def test_a_position_cap_that_would_self_destruct_is_refused():
+    """A losing binary contract loses the whole position, so a 15% position against a 10% full stop
+    means the first loss permanently halts the bot. That is a config error, not a surprise later."""
+    from kalshi_bot.risk import RiskLimits
+
+    with pytest.raises(ConfigError) as e:
+        RiskLimits.from_toml({"max_position_fraction": 0.15})
+    assert "max_drawdown_fraction" in str(e.value) and "permanently" in str(e.value)
+
+    # raising the drawdown limit alone is still incoherent: one loss would end the day
+    with pytest.raises(ConfigError, match="daily halt"):
+        RiskLimits.from_toml({"max_position_fraction": 0.15, "max_drawdown_fraction": 0.50})
+
+    # moving the whole ladder together is accepted; the operator is choosing to risk half the account
+    lim = RiskLimits.from_toml({"max_position_fraction": 0.15, "max_daily_loss_fraction": 0.30,
+                                "max_weekly_loss_fraction": 0.45, "max_drawdown_fraction": 0.50})
+    assert lim.max_position_fraction == Decimal("0.15")
+
+    with pytest.raises(ConfigError, match="fraction of equity"):
+        RiskLimits.from_toml({"max_position_fraction": 15})      # 15 not 0.15
+    with pytest.raises(ConfigError, match="weekly"):
+        RiskLimits.from_toml({"max_daily_loss_fraction": 0.20, "max_weekly_loss_fraction": 0.10})
+    with pytest.raises(ConfigError, match="max_positions_per_event"):
+        RiskLimits.from_toml({"max_open_positions": 2, "max_positions_per_event": 3})
+
+
+def test_configured_position_cap_is_what_the_engine_enforces(tmp_path):
+    """The cap in force is the configured one, not a hardcoded 1%."""
+    from kalshi_bot.risk import RiskLimits
+
+    st = settings(tmp_path)
+    storage = Storage(st.db_path)
+    lim = RiskLimits.from_toml({"max_position_fraction": 0.05, "max_daily_loss_fraction": 0.15,
+                                "max_weekly_loss_fraction": 0.25, "max_drawdown_fraction": 0.40})
+    risk = RiskEngine(storage, st, limits=lim, clock=lambda: NOW)
+    snap = snapshot(balance_cents=100_00)   # $100 equity
+    risk.refresh(snap, NOW)
+    # 5% of $100 is a $5.00 cap: 11 contracts at 45c = $4.95 passes, 12 = $5.40 does not.
+    # Under the 1% default the cap would have been $1.00 and both would have been rejected.
+    a = risk.approve(intent(count=11), snap, NOW)
+    assert a.per_position_cap_cents == 500
+    with pytest.raises(RiskRejected, match="exceeds per-position cap"):
+        risk.approve(intent(count=12), snap, NOW)
+    storage.close()

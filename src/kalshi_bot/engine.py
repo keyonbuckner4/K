@@ -30,7 +30,7 @@ from .intent import Intent
 from .models import Event, Fill
 from .orderbook import OrderBook
 from .ratelimit import SharedRateLimiter
-from .risk import RiskEngine
+from .risk import RiskLimits, RiskEngine
 from .storage import Storage
 from .strategies import build_strategies
 from .strategies.base import ScanContext, Strategy
@@ -127,7 +127,9 @@ class Engine:
         self.fee_sched = FeeSchedule.from_config(cfg.get("fees"))
         self.gate_cfg = GateConfig.from_toml(cfg.get("gate"))
         eng = cfg.get("engine", {})
-        self.risk = RiskEngine(self.storage, settings, self.alerts, blocked_categories=tuple(eng.get("blocked_categories", ())) or None)
+        self.risk_limits = RiskLimits.from_toml(cfg.get("risk"))
+        self.risk = RiskEngine(self.storage, settings, self.alerts, limits=self.risk_limits,
+                               blocked_categories=tuple(eng.get("blocked_categories", ())) or None)
         self.account = AccountView(self.client, float(eng.get("positions_cache_ttl_sec", 5)))
         ex = cfg.get("execution", {})
         self.exec_observe = Executor(self.client, self.storage, self.risk, mode=OBSERVE, alerts=self.alerts)
@@ -183,6 +185,7 @@ class Engine:
             info["balance_cents"] = bal.balance_cents
             info["portfolio_value_cents"] = bal.portfolio_value_cents
         info["limiter"] = self.limiter.describe()
+        info["risk_limits"] = self.risk_limits.describe()
         info["model_version"] = MODEL_VERSION
         info["scored_since"] = model_version_since(self.storage)
         log.info("startup: %s", info)

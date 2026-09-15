@@ -57,6 +57,30 @@ Save private keys as `*.pem` files so `.gitignore` covers them.
 * **Fees first.** Every edge subtracts Kalshi's fee: `round_up_to_cent(multiplier * C * P * (1-P))`
   per order, with the multiplier read from `GET /series/{ticker}` (`fee_type`, `fee_multiplier`).
 
+## Risk limits
+
+Set in `[risk]` in `config/bot.toml`; the defaults are the BRIEF.md numbers. Every fraction is of
+account equity, so `0.01` is 1%.
+
+| Limit | Default | On a $100 account |
+|---|---|---|
+| `max_position_fraction` | 1% | $1.00 per position |
+| `max_daily_loss_fraction` | 3% | $3.00, then halt until the next trading day |
+| `max_weekly_loss_fraction` | 6% | $6.00, then halt until `bot resume --weekly` |
+| `max_drawdown_fraction` | 10% | $10.00 peak-to-trough, then a permanent full stop |
+
+These form a ladder, and the bot refuses to start if it is incoherent. An event contract is binary:
+a losing YES contract settles at zero, so a losing position loses **all** of its cost. "One position
+fully lost" is therefore the ordinary outcome of a bad trade, not a tail case. So
+`max_position_fraction` has to stay below both `max_daily_loss_fraction` and
+`max_drawdown_fraction`, or the first losing trade trips a halt. With a 15% position against the
+10% full stop, the bot would place one trade, lose it, and stop permanently.
+
+Raising the position size does not create edge. It multiplies whatever edge exists, including a
+negative one, so it belongs after the scorecard is green, not before. The lever that raises profit
+per trade without raising risk of ruin is capital: 1% of $1,000 is ten times the position of 1% of
+$100 at exactly the same percentage risk.
+
 ## Strategies (build order from the BRIEF)
 
 1. **Ladder arbitrage** (`ladder_arb`): exhaustive mutually-exclusive ladders whose YES asks sum
