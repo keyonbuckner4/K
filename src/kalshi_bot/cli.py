@@ -321,6 +321,50 @@ def cmd_compact(args, settings):
             storage.close()
 
 
+async def cmd_backfill(args, settings):
+    """Score the crypto model against markets that already settled, instead of waiting for new ones."""
+    from .backfill import backfill_crypto
+    from .data.history import HistoryFeed
+    from .gate import GateConfig
+
+    eng = _engine(args, settings)
+    history = HistoryFeed()
+    scratch_path = settings.db_path.with_name(f"backfill.{settings.env}.db")
+    if args.fresh and scratch_path.exists():
+        scratch_path.unlink()
+    scratch = Storage(scratch_path, log_heartbeat_sec=0)
+    try:
+        cfg = (settings.toml.get("strategies", {}) or {}).get("crypto", {}) or {}
+        series_map = {str(k).upper(): str(v) for k, v in (cfg.get("series") or {}).items()}
+        if args.series:
+            wanted = {s.upper() for s in args.series}
+            series_map = {k: v for k, v in series_map.items() if k in wanted or v.upper() in wanted}
+        if not series_map:
+            raise ConfigError("no crypto series to backfill; check [strategies.crypto] series in config/bot.toml")
+        for series in series_map.values():
+            if not await eng.ensure_series_fee(series):
+                raise ConfigError(f"fee parameters unavailable for {series}; not guessing them")
+        print(f"replaying {list(series_map.values())} over the last {args.days} days from {eng.data_client.base_url}...", file=sys.stderr)
+        rep, stats = await backfill_crypto(eng.data_client, history, scratch, series_map=series_map, days=float(args.days),
+                                           gate=GateConfig.from_toml(settings.toml.get("gate")), fee_sched=eng.fee_sched,
+                                           max_contracts=int(cfg.get("max_contracts", 5)),
+                                           min_minutes_to_close=float(cfg.get("min_minutes_to_close", 20)),
+                                           realized_window_hours=float(cfg.get("realized_vol_window_hours", 72)),
+                                           vol_source=str(cfg.get("vol_source", "deribit_dvol")))
+        print("WHAT WOULD MAKE THIS WRONG:", file=sys.stderr)
+        for c in rep.caveats:
+            print(" -", c, file=sys.stderr)
+        out = rep.to_dict()
+        out["backfill"] = {"markets_seen": stats.markets_seen, "markets_scored": stats.markets_scored,
+                           "decision_points": stats.decision_points, "candidates": stats.candidates,
+                           "vol_source": stats.vol_source, "price_scale": stats.price_scale, "skipped": stats.skipped}
+        _print(out)
+    finally:
+        scratch.close()
+        await history.close()
+        await eng.close()
+
+
 async def cmd_review(args, settings):
     from .review import weekly_review
 
@@ -334,7 +378,16 @@ async def cmd_review(args, settings):
 async def cmd_gaps(args, settings):
     storage = Storage(settings.db_path)
     try:
-        _print(storage.arb_gaps(since=time.time() - float(args.hours) * 3600, limit=int(args.limit)))
+        if args.summary:
+            from .backtest import gap_summary
+            from .gate import GateConfig
+
+            gate = GateConfig.from_toml(settings.toml.get("gate"))
+            out = gap_summary(storage, days=float(args.hours) / 24, min_net_edge_cents=gate.min_net_edge_cents)
+            print(out["verdict"], file=sys.stderr)
+            _print(out)
+        else:
+            _print(storage.arb_gaps(since=time.time() - float(args.hours) * 3600, limit=int(args.limit)))
     finally:
         storage.close()
 
@@ -475,10 +528,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gaps", help="detected ladder gaps")
     s.add_argument("--hours", default=48)
     s.add_argument("--limit", default=200)
+    s.add_argument("--summary", action="store_true", help="did arbitrage find anything tradeable, in one line")
     s = sub.add_parser("decisions", help="decision log")
     s.add_argument("--hours", default=24)
     s.add_argument("--strategy")
     s.add_argument("--limit", default=200)
+    s = sub.add_parser("backfill", help="score the crypto model against already-settled markets (evidence without waiting)")
+    s.add_argument("--days", default=30)
+    s.add_argument("--series", action="append", help="limit to these assets or series tickers (repeatable)")
+    s.add_argument("--fresh", action="store_true", help="discard any previous backfill database first")
     s = sub.add_parser("compact", help="shrink the database: one model row and one quote per market per bucket (bot must be stopped)")
     s.add_argument("--bucket-min", default=30, type=float)
     s = sub.add_parser("dashboard", help="status page with HALT button")
@@ -495,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"setup": cmd_setup, "balance": cmd_balance, "doctor": cmd_doctor, "status": cmd_status, "markets": cmd_markets, "events": cmd_events, "book": cmd_book,
             "series": cmd_series, "scan": cmd_scan, "run": cmd_run, "watch": cmd_watch, "positions": cmd_positions, "orders": cmd_orders,
-            "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "review": cmd_review, "gaps": cmd_gaps,
+            "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "backfill": cmd_backfill, "review": cmd_review, "gaps": cmd_gaps,
             "decisions": cmd_decisions, "dashboard": cmd_dashboard}
 SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume, "compact": cmd_compact}
 

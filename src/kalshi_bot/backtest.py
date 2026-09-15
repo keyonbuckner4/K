@@ -22,6 +22,7 @@ from typing import Any
 from .client import KalshiClient
 from .errors import ApiError, UnexpectedApiResponse
 from .fees import quadratic_fee
+from .models import dec
 from .storage import Storage
 
 log = logging.getLogger(__name__)
@@ -107,10 +108,13 @@ def model_version_since(storage: Storage, now: float | None = None) -> float:
 
 
 def run_backtest(storage: Storage, since_days: float = 30.0, fee_multiplier: Decimal = Decimal("0.07"),
-                 since_model_change: bool = True) -> BacktestReport:
-    since = time.time() - since_days * 86400
+                 since_model_change: bool = True, now: float | None = None) -> BacktestReport:
+    """``now`` anchors the scoring window; a backfill replaying old markets must pass its own, or the
+    window would be measured from wall-clock time and cut off the very decisions it just replayed."""
+    now = time.time() if now is None else now
+    since = now - since_days * 86400
     if since_model_change:
-        since = max(since, model_version_since(storage))
+        since = max(since, model_version_since(storage, now))
     rep = BacktestReport(since=since)
     # the latest model view per market, resolved in SQL: a row cap here once hid every settled market
     latest = {r["market_ticker"]: r for r in storage.latest_model_decisions(since) if r["model_prob"]}
@@ -222,6 +226,51 @@ def activity_stats(storage: Storage, days: float = 7.0, now: float | None = None
     per_day = len(pairs) / covered
     return {"window_days": days, "days_observed": round(covered, 2), "distinct_positions": len(pairs), "trades_per_day": round(per_day, 1),
             "trades_per_week": round(per_day * 7, 1), "by_strategy": {k: len(v) for k, v in by.items()}}
+
+
+def gap_summary(storage: Storage, days: float = 7.0, min_net_edge_cents: Decimal = Decimal("5"),
+                now: float | None = None) -> dict[str, Any]:
+    """What the ladder-arbitrage scan actually found.
+
+    Arbitrage is the one strategy whose evidence is not a Brier score: a ladder whose YES asks sum
+    below a dollar after fees is mispriced no matter what any model thinks. So the question is only
+    whether such gaps existed and cleared the fee threshold, which this answers directly instead of
+    leaving it in a JSON dump.
+    """
+    now = time.time() if now is None else now
+    rows = storage.arb_gaps(since=now - days * 86400, limit=100000)
+    out: dict[str, Any] = {"days": days, "gaps_logged": len(rows), "threshold_cents": str(min_net_edge_cents),
+                           "cleared_threshold": 0, "by_kind": {}, "best_net_cents": None, "events_with_a_clearing_gap": [],
+                           "verdict": "no ladder gaps logged at all: nothing to trade on this strategy"}
+    if not rows:
+        return out
+    best = None
+    events: set[str] = set()
+    for r in rows:
+        kind = str(r.get("kind"))
+        k = out["by_kind"].setdefault(kind, {"logged": 0, "cleared": 0})
+        k["logged"] += 1
+        net = dec(r.get("net_edge_cents"))
+        if net is None:
+            continue
+        if best is None or net > best:
+            best = net
+        if net >= min_net_edge_cents:
+            k["cleared"] += 1
+            out["cleared_threshold"] += 1
+            events.add(str(r.get("event_ticker")))
+    out["best_net_cents"] = str(best) if best is not None else None
+    out["events_with_a_clearing_gap"] = sorted(events)[:50]
+    span = (now - min(float(r["ts"]) for r in rows)) / 86400
+    out["days_observed"] = round(max(span, 1 / 24), 2)
+    if out["cleared_threshold"]:
+        out["verdict"] = (f"{out['cleared_threshold']} of {len(rows)} logged gaps cleared {min_net_edge_cents}c net over "
+                          f"{out['days_observed']} days, across {len(events)} events. These are structural, not forecasts: "
+                          f"worth checking whether the depth was real before trading them.")
+    else:
+        out["verdict"] = (f"{len(rows)} gaps logged over {out['days_observed']} days but none cleared {min_net_edge_cents}c "
+                          f"net after fees (best was {out['best_net_cents']}c). Arbitrage has found nothing tradeable.")
+    return out
 
 
 def caveats(rep: BacktestReport) -> list[str]:

@@ -286,3 +286,26 @@ def test_scorecard_starts_over_at_a_model_change(tmp_path):
     s.set_state("last_backtest", rep.to_dict())
     assert "Only decisions made by this version" in render(status_payload(st, s))
     s.close()
+
+
+def test_gap_summary_answers_whether_arbitrage_found_anything(tmp_path):
+    from kalshi_bot.backtest import gap_summary
+
+    s = Storage(tmp_path / "g.db")
+    now = time.time()
+    assert "nothing to trade" in gap_summary(s, days=7, now=now)["verdict"]
+
+    # three gaps, none clearing 5c after fees: the honest answer is "nothing tradeable"
+    for i, net in enumerate(["-2.2", "1.4", "4.9"]):
+        s.log_arb_gap(f"E-{i}", "sum_yes_asks_below_1", 4, "0.98", "6.0", "4.6", net, 5, [], ts=now - 3600 * (i + 1))
+    out = gap_summary(s, days=7, now=now)
+    assert out["gaps_logged"] == 3 and out["cleared_threshold"] == 0
+    assert out["best_net_cents"] == "4.9" and "none cleared 5c" in out["verdict"]
+    assert out["by_kind"]["sum_yes_asks_below_1"] == {"logged": 3, "cleared": 0}
+
+    # one that does clear, and the verdict changes to something actionable
+    s.log_arb_gap("E-9", "crossed_book", 2, "0.97", "9.0", "2.0", "7.0", 5, [], ts=now - 600)
+    out = gap_summary(s, days=7, now=now)
+    assert out["cleared_threshold"] == 1 and out["events_with_a_clearing_gap"] == ["E-9"]
+    assert "1 of 4 logged gaps cleared 5c" in out["verdict"] and "structural, not forecasts" in out["verdict"]
+    s.close()

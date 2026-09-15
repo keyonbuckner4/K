@@ -56,7 +56,7 @@ def test_balance_without_credentials_fails_cleanly(tmp_path, capsys):
 def test_parser_has_every_command():
     p = cli.build_parser()
     names = set(cli.COMMANDS) | set(cli.SYNC_COMMANDS)
-    assert {"balance", "doctor", "scan", "run", "halt", "resume", "backtest", "review", "dashboard", "watch", "flatten", "compact"} <= names
+    assert {"balance", "doctor", "scan", "run", "halt", "resume", "backtest", "review", "dashboard", "watch", "flatten", "compact", "backfill"} <= names
     args = p.parse_args(["run", "--trade", "--strategy", "ladder_arb", "--dashboard"])
     assert args.trade and args.strategy == ["ladder_arb"] and args.dashboard
 

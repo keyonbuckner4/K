@@ -73,7 +73,7 @@ Save private keys as `*.pem` files so `.gitignore` covers them.
    not knowing what the market already knew.
 3. **Crypto thresholds** (`crypto`): BTC/ETH levels priced as barrier options from Kraken spot and
    Deribit's DVOL implied-volatility index (realized vol only as a logged fallback).
-4. **Economics** (`economics`): normal consensus views you write in `config/econ_views.toml`.
+8. **Economics** (`economics`): normal consensus views you write in `config/econ_views.toml`.
 
 Every directional candidate also passes the gate's fifth rule: it must be priced strictly inside
 5c-95c. The bot never bets against a market that is already near certain; the first observe
@@ -135,6 +135,36 @@ undocumented API response, crash with traceback) is written to `data\logs\bot.de
 copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be on and
 logged in; for true 24/7 use a small always-on server (roadmap item 5).
 
+## Evidence without waiting: `bot backfill`
+
+Forward observation is limited by how fast markets settle. The daily crypto ladders settle once a
+day, so a verdict needing 20 contested settlements spread over several days takes about a week.
+
+`uv run bot backfill --days 30` gets the same evidence from history. For every already-settled
+market it replays the crypto model at each point in that market's life using only what existed at
+that moment (Kraken spot, Deribit DVOL, and Kalshi's own candlesticks for what the market was
+charging), applies the same gate, and scores the result with exactly the live verdict logic. It
+writes to its own `data/backfill.<env>.db`, so it cannot contaminate the live scorecard.
+
+What it can and cannot settle:
+
+- It **can** say whether the model's probabilities beat the prices the market was charging, over
+  hundreds of settled markets, in minutes rather than a week.
+- It **cannot** say whether the orders would have filled. Candlesticks carry no order book, so
+  depth and queue position are unknown and the P&L is optimistic even after the one-tick penalty.
+  A green backfill is necessary evidence, not sufficient.
+- It **cannot** cover the weather model. That needs the NWS forecast as it stood at decision time,
+  and the public API serves only the current forecast. Weather has to be observed forward.
+
+Nothing is interpolated: a hole in the spot or volatility history becomes a skipped decision point
+with a counted reason, never an invented price. Candlestick price units are decided once per market
+from the whole response (explicit `_dollars` keys or any non-integer value mean dollars, otherwise
+integer cents), and an unrecognised shape raises instead of being guessed at.
+
+`uv run bot gaps --summary` answers the other evidence question in one line: whether ladder
+arbitrage found gaps that cleared the fee threshold. That strategy needs no forecast to be right,
+so its bar is only whether the gaps existed.
+
 ## Decision log volume
 
 Every scan prices every open market (about 1,400). A row per market per scan was 2-3 million rows a day,
@@ -155,13 +185,16 @@ log as `model scoring failed` with a traceback.
 2. **Model rewrite, built 2026-09-14 (this phase).** Weather: observation floor/cap, remaining-hours forecast,
    morning trading window. Crypto: DVOL implied volatility. Gate: no bets against near-certain markets.
    Scorecard: per-strategy table and the trade-time Brier comparison. Engine: watchdog restart on a hang.
-3. **Observe period 2, in progress.** Same scorecard, same bar: verdict green on at least 20 contested
+3. **Backfill, built 2026-09-15.** `bot backfill` replays the crypto model over already-settled
+   markets so its verdict does not have to wait for new ones; `bot gaps --summary` gives the
+   arbitrage verdict directly. Neither can shortcut execution risk, which still needs a live run.
+4. **Observe period 2, in progress.** Same scorecard, same bar: verdict green on at least 20 contested
    settlements over several days AND "model knew better" at trade time, per strategy. Expect a week.
-4. **Position manager (approved, after step 3).** Take-profit / edge-gone / time-based exits for open
+5. **Position manager (approved, after step 4).** Take-profit / edge-gone / time-based exits for open
    positions through the same reduce-only path, observe-first.
-5. **Edge-threshold sweep.** Only once a strategy's verdict is green: score the logged decisions as if the
+6. **Edge-threshold sweep.** Only once a strategy's verdict is green: score the logged decisions as if the
    gate's minimum net edge were 3c or 4c instead of 5c, and report trades per week and pessimistic P&L per
    threshold. A lower threshold on a losing model only multiplies losing trades.
-6. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
-7. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
+7. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
+8. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
    venue; set `strategies.weather.nws_user_agent` to a real contact.
