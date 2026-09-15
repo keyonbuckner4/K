@@ -25,22 +25,52 @@ class CryptoThresholdStrategy(Strategy):
         self.feed = feed or CryptoFeed(str(self.cfg.get("spot_source", "kraken")), str(self.cfg.get("vol_source", "deribit_dvol")),
                                        int(self.cfg.get("realized_vol_window_hours", 72)),
                                        fallback_realized=bool(self.cfg.get("vol_fallback_realized", True)))
-        self.min_minutes = float(self.cfg.get("min_minutes_to_close", 20))
+        self.min_minutes = float(self.cfg.get("min_minutes_to_close", 10))
+        self.feed_assets = {"BTC", "ETH"}
 
     def series(self) -> list[str]:
         return list(self.series_map.values())
 
+    def series_patterns(self) -> list[str]:
+        """Prefixes per asset, e.g. ``{ BTC = ["KXBTC"], ETH = ["KXETH"] }``. Every open series whose
+        ticker starts with one of them is traded as that asset, so the intraday and hourly ladders are
+        picked up without anyone hand-copying a ticker out of the Kalshi web app."""
+        out: list[str] = []
+        for pats in (self.cfg.get("series_patterns") or {}).values():
+            out.extend(str(x).upper() for x in (pats if isinstance(pats, (list, tuple)) else [pats]))
+        return out
+
+    def wants(self, profile: Any) -> bool:
+        asset = self.asset_for_pattern(str(profile.series_ticker))
+        return asset is not None and asset in self.feed_assets
+
+    def asset_for_pattern(self, ticker: str) -> str | None:
+        t = ticker.upper()
+        for asset, pats in (self.cfg.get("series_patterns") or {}).items():
+            for pat in (pats if isinstance(pats, (list, tuple)) else [pats]):
+                if t.startswith(str(pat).upper()):
+                    return str(asset).upper()
+        return None
+
+    def adopt_series(self, profiles: list[Any]) -> list[str]:
+        added = []
+        for p in profiles:
+            t = str(p.series_ticker).upper()
+            if t in {v.upper() for v in self.series_map.values()}:
+                continue
+            asset = self.asset_for_pattern(t)
+            if asset is None or asset not in self.feed_assets:
+                continue
+            self.series_map[f"{asset}:{t}"] = t
+            added.append(t)
+        return added
+
     async def scan(self, ctx: ScanContext) -> list[Intent]:
         intents: list[Intent] = []
-        by_series = {v: k for k, v in self.series_map.items()}
+        by_series = {v.upper(): k.split(":", 1)[0] for k, v in self.series_map.items()}
         for event in ctx.events:
-            asset = by_series.get(event.series_ticker)
+            asset = by_series.get((event.series_ticker or "").upper())
             if asset is None:
-                continue
-            try:
-                q = await self.feed.quote(asset)
-            except DataUnavailable as e:
-                self.reject("model", f"no spot/vol for {asset}: {e}", event_ticker=event.event_ticker)
                 continue
             for m in event.markets:
                 if not m.is_open():
@@ -52,6 +82,13 @@ class CryptoThresholdStrategy(Strategy):
                 tau_s = (st - ctx.now).total_seconds()
                 if tau_s < self.min_minutes * 60:
                     self.reject("model", f"closes in {tau_s / 60:.1f} min < {self.min_minutes}", m)
+                    continue
+                # the volatility input is chosen per market: a 15-minute ladder and a daily one
+                # share an underlying but not a horizon, and 30-day implied vol misprices the former
+                try:
+                    q = await self.feed.quote(asset, tau_seconds=tau_s)
+                except DataUnavailable as e:
+                    self.reject("model", f"no spot/vol for {asset}: {e}", m)
                     continue
                 p = prob_yes_lognormal(m, q.spot, q.sigma_annual, tau_s / SECONDS_PER_YEAR)
                 if p is None:

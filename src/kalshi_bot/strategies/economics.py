@@ -38,7 +38,7 @@ class EconomicsStrategy(Strategy):
         self._series = sorted({t.split("-", 1)[0] for t in self.views})
 
     def series(self) -> list[str]:
-        return self._series
+        return sorted(set(self._series) | self.discovered)
 
     async def scan(self, ctx: ScanContext) -> list[Intent]:
         intents: list[Intent] = []
@@ -46,7 +46,9 @@ class EconomicsStrategy(Strategy):
         for event in ctx.events:
             view = self.views.get(event.event_ticker)
             if view is None:
-                self.reject("model", "no consensus view configured for this event", event_ticker=event.event_ticker)
+                # named explicitly so the operator can see exactly what to add to econ_views.toml
+                self.reject("model", f"no consensus view configured for {event.event_ticker} ({event.title or 'untitled'}); "
+                                     f"add one to {self.views_path.name} to price it", event_ticker=event.event_ticker)
                 continue
             for m in event.markets:
                 if not m.is_open():

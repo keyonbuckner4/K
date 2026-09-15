@@ -88,6 +88,11 @@ series_cache_ttl_sec = 21600
 market_cache_ttl_sec = 20
 positions_cache_ttl_sec = 5
 max_events_per_series = 6
+# Series discovery: strategies that declare series_patterns or categories adopt every matching open
+# series, so a new intraday or commodity ladder is traded without hand-copying a ticker. Refreshed
+# on this interval; the cap keeps the busiest series when a category matches more than we can scan.
+series_discovery_sec = 3600
+max_discovered_series = 40
 # Categories the bot will never trade (BRIEF.md non-goals). Matched case-insensitively as substrings.
 blocked_categories = ["sport", "politic", "election", "culture", "entertainment"]
 
@@ -108,6 +113,11 @@ port = 8787
 enabled = true
 mode = "observe"                 # observe | trade   (trade also requires `bot run --trade`)
 series = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHAUS", "KXHIGHDEN", "KXHIGHLAX", "KXHIGHPHIL", "KXLOWNY", "KXBTCD", "KXETHD"]
+# Arbitrage needs no model, no forecast and no price feed: an exhaustive ladder whose YES asks sum
+# below a dollar after fees is mispriced whatever the underlying is. So it adopts every open ladder
+# in these categories, which is how oil and the economic releases get covered without needing a
+# model for either. Blocked categories (sport, politics) are filtered out before adoption.
+categories = ["commodit", "energy", "oil", "econom", "inflation", "climate", "weather", "crypto", "financial"]
 max_contracts_per_leg = 5
 max_legs = 12
 
@@ -193,14 +203,31 @@ enabled = true
 mode = "observe"
 max_contracts = 5
 series = { BTC = "KXBTCD", ETH = "KXETHD" }
+# Every other open series starting with these prefixes is traded as that asset, which picks up the
+# intraday and hourly BTC/ETH ladders without anyone copying a ticker out of the Kalshi web app.
+# Run `uv run bot discover --category crypto` to see exactly what it will adopt.
+series_patterns = { BTC = ["KXBTC"], ETH = ["KXETH"] }
 spot_source = "kraken"           # public, no key: https://api.kraken.com/0/public/Ticker
 vol_source = "deribit_dvol"      # deribit_dvol (30-day implied volatility index) | realized (Kraken candles)
 vol_fallback_realized = true     # if Deribit is unreachable, use realized vol and say so in the log and the decision's source
 realized_vol_window_hours = 72
-min_minutes_to_close = 20        # very short horizons make the barrier model fragile
+# Volatility is matched to the horizon. DVOL is a 30-day implied index, so it is the wrong input for
+# a market settling in 15 minutes; below short_horizon_hours the model uses realized vol measured
+# over short_window_hours of fine-grained candles instead.
+short_horizon_hours = 6
+short_window_hours = 12
+# Intraday ladders are eligible, but the gate still needs 10 minutes to settlement and 5c of net
+# edge after fees. At 50c the taker fee is about 1.75c per contract, so a 15-minute market has to be
+# mispriced by nearly 7c gross to be worth taking. Most will not be, and the gate will say so.
+min_minutes_to_close = 10
 
 [strategies.economics]
-enabled = false
+enabled = true
 mode = "observe"
 max_contracts = 5
+# Economic releases have no free live feed to price them from, so this strategy prices only events
+# you have written a view for. With discovery on it still finds every open economics event and logs
+# each one by name as "no consensus view configured for ...", which is the list of events worth
+# writing a view for. Ladder arbitrage covers the same events structurally in the meantime.
+categories = ["econom", "inflation", "cpi", "fed", "jobs", "gdp"]
 views_path = "config/econ_views.toml"   # your consensus distributions; see config/econ_views.example.toml

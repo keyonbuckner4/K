@@ -55,14 +55,21 @@ class VolQuote:
 
 class CryptoFeed:
     def __init__(self, spot_source: str = "kraken", vol_source: str = "realized", window_hours: int = 72,
-                 transport: httpx.AsyncBaseTransport | None = None, cache_ttl: float = 60.0, fallback_realized: bool = True):
+                 transport: httpx.AsyncBaseTransport | None = None, cache_ttl: float = 60.0, fallback_realized: bool = True,
+                 short_horizon_hours: float = 6.0, short_window_hours: float = 12.0):
         self.spot_source = spot_source
         self.vol_source = vol_source
         self.window_hours = int(window_hours)
         self.fallback_realized = fallback_realized
+        # Volatility has to match the horizon being priced. DVOL is a 30-day implied index: for a
+        # market settling in 15 minutes it is the wrong number, and using it would systematically
+        # misprice every intraday ladder. Below short_horizon_hours the model uses realized vol
+        # measured over short_window_hours of fine-grained candles instead.
+        self.short_horizon_sec = float(short_horizon_hours) * 3600
+        self.short_window_hours = float(short_window_hours)
         self._fallback_warned = 0.0
         self._http = httpx.AsyncClient(timeout=15.0, transport=transport, headers={"User-Agent": "kalshi-bot"})
-        self._cache: dict[str, VolQuote] = {}
+        self._cache: dict[tuple[str, str], VolQuote] = {}
         self.cache_ttl = cache_ttl
 
     async def close(self) -> None:
@@ -90,10 +97,12 @@ class CryptoFeed:
         entry = next(iter(result.values()))
         return float(entry["c"][0])
 
-    async def kraken_realized_vol(self, asset: str) -> tuple[float, int, float]:
-        """Annualized realized vol over the configured window. Returns (sigma, candle_minutes, hours_covered)."""
-        interval = kraken_interval_for(self.window_hours)
-        since = int(time.time()) - self.window_hours * 3600
+    async def kraken_realized_vol(self, asset: str, hours: float | None = None) -> tuple[float, int, float]:
+        """Annualized realized vol over ``hours`` (default: the configured window).
+        Returns (sigma, candle_minutes, hours_covered)."""
+        window = float(self.window_hours if hours is None else hours)
+        interval = kraken_interval_for(window)
+        since = int(time.time()) - int(window * 3600)
         data = await self._json(f"{KRAKEN}/0/public/OHLC", {"pair": PAIRS[asset], "interval": interval, "since": since})
         if data.get("error"):
             raise DataUnavailable(f"kraken ohlc error: {data['error']}")
@@ -102,10 +111,10 @@ class CryptoFeed:
         if not candles:
             raise DataUnavailable("kraken ohlc without candles")
         closes = [float(c[4]) for c in candles]
-        hours = len(closes) * interval / 60
-        if hours < self.window_hours * 0.5:
-            raise DataUnavailable(f"kraken returned {len(closes)} x {interval}m candles ({hours:.1f}h), under half the {self.window_hours}h window")
-        return realized_vol_annualized(closes, interval), interval, hours
+        covered = len(closes) * interval / 60
+        if covered < window * 0.5:
+            raise DataUnavailable(f"kraken returned {len(closes)} x {interval}m candles ({covered:.1f}h), under half the {window:.1f}h window")
+        return realized_vol_annualized(closes, interval), interval, covered
 
     async def deribit_dvol(self, asset: str) -> float:
         data = await self._json(f"{DERIBIT}/api/v2/public/get_index_price", {"index_name": f"{asset.lower()}dvol_usdc"})
@@ -114,15 +123,24 @@ class CryptoFeed:
             raise DataUnavailable("deribit dvol without index_price")
         return float(res["index_price"]) / 100.0
 
-    async def quote(self, asset: str) -> VolQuote:
+    def regime_for(self, tau_seconds: float | None) -> str:
+        """'short' for an intraday market, 'standard' otherwise. Picks which volatility input applies."""
+        return "short" if tau_seconds is not None and tau_seconds <= self.short_horizon_sec else "standard"
+
+    async def quote(self, asset: str, tau_seconds: float | None = None) -> VolQuote:
+        """Spot and the volatility appropriate to a market settling in ``tau_seconds``."""
         asset = asset.upper()
         if asset not in PAIRS:
             raise DataUnavailable(f"unsupported asset {asset}")
-        c = self._cache.get(asset)
+        regime = self.regime_for(tau_seconds)
+        c = self._cache.get((asset, regime))
         if c and time.time() - c.ts < self.cache_ttl:
             return c
         spot = await self.kraken_spot(asset)
-        if self.vol_source == "deribit_dvol":
+        if regime == "short":
+            sigma, interval, hours = await self.kraken_realized_vol(asset, hours=self.short_window_hours)
+            src = f"kraken_spot+realized_{hours:.0f}h@{interval}m(intraday)"
+        elif self.vol_source == "deribit_dvol":
             try:
                 sigma, src = await self.deribit_dvol(asset), "kraken_spot+deribit_dvol"
             except DataUnavailable as e:
@@ -138,5 +156,5 @@ class CryptoFeed:
             sigma, interval, hours = await self.kraken_realized_vol(asset)
             src = f"kraken_spot+realized_{hours:.0f}h@{interval}m"
         q = VolQuote(spot, sigma, src, time.time())
-        self._cache[asset] = q
+        self._cache[(asset, regime)] = q
         return q

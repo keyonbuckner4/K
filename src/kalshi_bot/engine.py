@@ -155,6 +155,12 @@ class Engine:
         # Watchdog: if no scan or scoring pass completes for this long, the run raises so the supervisor
         # (Windows task, systemd) restarts the bot instead of letting a hung process look alive.
         self.watchdog_sec = float(eng_cfg.get("watchdog_sec", 900))
+        # Series discovery: strategies that declare ticker patterns pick up every matching open series,
+        # so a new intraday ladder is traded without anyone copying a ticker out of the web app.
+        self.discovery_ttl = float(eng_cfg.get("series_discovery_sec", 3600))
+        self.max_discovered_series = int(eng_cfg.get("max_discovered_series", 40))
+        self._last_discovery = 0.0
+        self.profiles: list[Any] = []
         self.last_progress = time.time()
         self._watchdog_tripped: str | None = None
 
@@ -305,6 +311,42 @@ class Engine:
         self.last_fill_sync = time.time()
         return n
 
+    # ---- series discovery --------------------------------------------------------------------------
+    async def discover_series(self) -> list[Any]:
+        """Profile every open series on the exchange, minus the blocked categories."""
+        from .discover import configured_series, profile_series
+
+        events = await self.data_client.events(status="open", with_nested_markets=True, limit=200, max_pages=20)
+        profiles = profile_series(events, datetime.now(timezone.utc), configured_series(self.cfg))
+        blocked = self.risk.blocked
+        kept = [p for p in profiles if not any(b in (p.category or "").lower() for b in blocked)]
+        self.profiles = kept
+        self._last_discovery = time.time()
+        log.info("series discovery: %d open series (%d after blocked categories), %d events",
+                 len(profiles), len(kept), len(events))
+        return kept
+
+    async def maybe_discover(self) -> None:
+        """Refresh discovery when stale, and let each strategy adopt what matches its patterns."""
+        if not any(s.enabled and s.discovers() for s in self.strategies):
+            return
+        if time.time() - self._last_discovery < self.discovery_ttl:
+            return
+        try:
+            profiles = await self.discover_series()
+        except (ApiError, UnexpectedApiResponse) as e:
+            log.warning("series discovery failed (%s); strategies keep the series they already have", e)
+            self._last_discovery = time.time()
+            return
+        for strat in self.strategies:
+            if not strat.enabled or not strat.discovers():
+                continue
+            # profiles are sorted by market count, so a cap keeps the busiest series
+            wanted = [p for p in profiles if strat.wants(p)][:self.max_discovered_series]
+            added = strat.adopt_series(wanted)
+            if added:
+                log.info("%s adopted %d discovered series: %s", strat.name, len(added), ", ".join(added))
+
     # ---- one scan ----------------------------------------------------------------------------------
     async def scan_once(self) -> ScanReport:
         rep = ScanReport(started=time.time())
@@ -322,6 +364,8 @@ class Engine:
                 else:
                     self.storage.log_decision("engine", "flatten", False, f"observe mode: flatten requested but not executed ({health.halted_reason})")
             await self.sync_fills()
+
+        await self.maybe_discover()
 
         all_tickers: list[str] = []
         for strat in self.strategies:

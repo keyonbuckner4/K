@@ -41,9 +41,55 @@ class Strategy:
         self.mode = str(self.cfg.get("mode", "observe"))
         self.enabled = bool(self.cfg.get("enabled", True))
         self.max_contracts = int(self.cfg.get("max_contracts", self.cfg.get("max_contracts_per_leg", 5)))
+        self.discovered: set[str] = set()
 
     def series(self) -> list[str]:
-        return [str(s) for s in self.cfg.get("series", [])]
+        return [str(s) for s in self.cfg.get("series", [])] + sorted(self.discovered)
+
+    def series_patterns(self) -> list[str]:
+        """Ticker prefixes this strategy will adopt when the engine discovers them, from
+        ``series_patterns`` in config. Empty means the strategy only trades what config names."""
+        raw = self.cfg.get("series_patterns") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(x).upper() for x in raw]
+
+    def match_categories(self) -> list[str]:
+        """Category substrings this strategy will adopt, from ``categories`` in config.
+
+        Matching on category rather than ticker is what makes families like oil or economic releases
+        reachable at all: their series tickers are not something to guess, but Kalshi labels the
+        events, and a substring like "commodit" finds them whatever they end up being called."""
+        raw = self.cfg.get("categories") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        return [str(x).lower() for x in raw]
+
+    def discovers(self) -> bool:
+        return bool(self.series_patterns() or self.match_categories())
+
+    def wants(self, profile: Any) -> bool:
+        """Whether a discovered series belongs to this strategy: ticker prefix or event category."""
+        t = str(profile.series_ticker).upper()
+        if any(t.startswith(pat) for pat in self.series_patterns()):
+            return True
+        cats = self.match_categories()
+        if not cats:
+            return False
+        hay = f"{profile.category or ''} {profile.sample_title or ''}".lower()
+        return any(c in hay for c in cats)
+
+    def adopt_series(self, profiles: list[Any]) -> list[str]:
+        """Take on the open series matching this strategy's patterns. Returns the newly added tickers."""
+        explicit = {str(s).upper() for s in self.cfg.get("series", [])}
+        added = []
+        for p in profiles:
+            t = str(p.series_ticker).upper()
+            if t in explicit or t in self.discovered or not self.wants(p):
+                continue
+            self.discovered.add(t)
+            added.append(t)
+        return added
 
     async def scan(self, ctx: ScanContext) -> list[Intent]:  # pragma: no cover - abstract
         raise NotImplementedError

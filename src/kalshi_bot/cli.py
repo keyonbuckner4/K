@@ -14,6 +14,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -321,6 +322,36 @@ def cmd_compact(args, settings):
             storage.close()
 
 
+async def cmd_discover(args, settings):
+    """What Kalshi actually lists right now, grouped by series, so tickers come from the exchange."""
+    from .discover import configured_series, profile_series
+
+    eng = _engine(args, settings)
+    try:
+        events = await eng.data_client.events(status="open", with_nested_markets=True, limit=200, max_pages=int(args.max_pages))
+        profiles = profile_series(events, datetime.now(timezone.utc), configured_series(settings.toml))
+        if args.category:
+            want = args.category.lower()
+            profiles = [p for p in profiles if want in (p.category or "").lower() or want in p.series_ticker.lower()
+                        or want in p.sample_title.lower()]
+        if args.max_minutes:
+            limit = float(args.max_minutes)
+            profiles = [p for p in profiles if p.median_minutes_to_close is not None and p.median_minutes_to_close <= limit]
+        if args.unconfigured:
+            profiles = [p for p in profiles if not p.used_by]
+        print(f"{len(events)} open events from {eng.data_client.base_url}; {len(profiles)} series shown\n", file=sys.stderr)
+        head = f"{'SERIES':<16} {'HORIZON':<18} {'MKTS':>5}  {'CATEGORY':<24} {'USED BY':<22} SAMPLE"
+        print(head, file=sys.stderr)
+        print("-" * len(head), file=sys.stderr)
+        for p in profiles:
+            print(f"{p.series_ticker:<16} {p.horizon:<18} {p.markets:>5}  {(p.category or '-')[:24]:<24} "
+                  f"{','.join(p.used_by) or '-':<22} {p.sample_title[:44]}", file=sys.stderr)
+        if args.json:
+            _print([p.to_dict() for p in profiles])
+    finally:
+        await eng.close()
+
+
 async def cmd_backfill(args, settings):
     """Score the crypto model against markets that already settled, instead of waiting for new ones."""
     from .backfill import backfill_crypto
@@ -533,6 +564,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hours", default=24)
     s.add_argument("--strategy")
     s.add_argument("--limit", default=200)
+    s = sub.add_parser("discover", help="list the series Kalshi actually has open, with their horizon and shape")
+    s.add_argument("--category", help="filter by category, series ticker or title text (e.g. crypto, oil, cpi)")
+    s.add_argument("--max-minutes", type=float, help="only series whose markets close within this many minutes (finds the intraday ladders)")
+    s.add_argument("--unconfigured", action="store_true", help="only series no strategy is pointed at yet")
+    s.add_argument("--max-pages", default=20)
+    s.add_argument("--json", action="store_true")
     s = sub.add_parser("backfill", help="score the crypto model against already-settled markets (evidence without waiting)")
     s.add_argument("--days", default=30)
     s.add_argument("--series", action="append", help="limit to these assets or series tickers (repeatable)")
@@ -553,7 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"setup": cmd_setup, "balance": cmd_balance, "doctor": cmd_doctor, "status": cmd_status, "markets": cmd_markets, "events": cmd_events, "book": cmd_book,
             "series": cmd_series, "scan": cmd_scan, "run": cmd_run, "watch": cmd_watch, "positions": cmd_positions, "orders": cmd_orders,
-            "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "backfill": cmd_backfill, "review": cmd_review, "gaps": cmd_gaps,
+            "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "backfill": cmd_backfill, "discover": cmd_discover, "review": cmd_review, "gaps": cmd_gaps,
             "decisions": cmd_decisions, "dashboard": cmd_dashboard}
 SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume, "compact": cmd_compact}
 
