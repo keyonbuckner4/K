@@ -167,6 +167,19 @@ undocumented API response, crash with traceback) is written to `data\logs\bot.de
 copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be on and
 logged in; for true 24/7 use a small always-on server (roadmap item 5).
 
+## Checking on it from somewhere else: `bot report`
+
+The dashboard binds to localhost, so nothing the bot knows is visible unless you are at the machine.
+`uv run bot report` prints the same numbers and writes them to `data/status/latest.md` and
+`latest.json`, which can be sent, pasted or served wherever you want them.
+
+It leads with the distinction that matters most: whether any order has actually been placed. A win
+rate from the scorecard is a record of trades the bot *would* have made, which is a different thing
+from money won or lost, and the report says so in words rather than leaving it to be inferred.
+
+Account equity is left out unless you pass `--include-equity`, because this repository is public.
+Where the snapshot goes is a deliberate choice, so the bot does not publish it anywhere on its own.
+
 ## Finding markets: `bot discover`
 
 Series tickers cannot be guessed. `KXBTCD` is the daily Bitcoin ladder, but the name of the

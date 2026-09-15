@@ -322,6 +322,23 @@ def cmd_compact(args, settings):
             storage.close()
 
 
+def cmd_report(args, settings):
+    """A portable snapshot of everything the dashboard shows, readable away from this machine."""
+    from .status import build_status, render_markdown, write_report
+
+    storage = Storage(settings.db_path)
+    try:
+        status = build_status(settings, storage, include_equity=bool(args.include_equity))
+        if args.json:
+            _print(status)
+        else:
+            print(render_markdown(status))
+        j, m = write_report(settings.root, status)
+        print(f"written: {m}\n         {j}", file=sys.stderr)
+    finally:
+        storage.close()
+
+
 async def cmd_discover(args, settings):
     """What Kalshi actually lists right now, grouped by series, so tickers come from the exchange."""
     from .discover import configured_series, profile_series
@@ -564,6 +581,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hours", default=24)
     s.add_argument("--strategy")
     s.add_argument("--limit", default=200)
+    s = sub.add_parser("report", help="portable status snapshot (markdown + json) you can read or send anywhere")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--include-equity", action="store_true", help="include account equity; off by default because this repo is public")
     s = sub.add_parser("discover", help="list the series Kalshi actually has open, with their horizon and shape")
     s.add_argument("--category", help="filter by category, series ticker or title text (e.g. crypto, oil, cpi)")
     s.add_argument("--max-minutes", type=float, help="only series whose markets close within this many minutes (finds the intraday ladders)")
@@ -592,7 +612,7 @@ COMMANDS = {"setup": cmd_setup, "balance": cmd_balance, "doctor": cmd_doctor, "s
             "series": cmd_series, "scan": cmd_scan, "run": cmd_run, "watch": cmd_watch, "positions": cmd_positions, "orders": cmd_orders,
             "cancel-all": cmd_cancel_all, "flatten": cmd_flatten, "backtest": cmd_backtest, "backfill": cmd_backfill, "discover": cmd_discover, "review": cmd_review, "gaps": cmd_gaps,
             "decisions": cmd_decisions, "dashboard": cmd_dashboard}
-SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume, "compact": cmd_compact}
+SYNC_COMMANDS = {"halt": cmd_halt, "resume": cmd_resume, "compact": cmd_compact, "report": cmd_report}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -602,7 +622,7 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
-    setup_logging(settings.root, settings.env, args.log_level, quiet=args.quiet or args.cmd in ("halt", "resume", "status", "gaps", "decisions", "setup"))
+    setup_logging(settings.root, settings.env, args.log_level, quiet=args.quiet or args.cmd in ("halt", "resume", "status", "gaps", "decisions", "setup", "report"))
     _banner(settings)
     # Every exit reason is also written to the file log: an unattended run (Windows task, systemd) has no console,
     # so stderr alone would leave "why did it stop?" unanswerable.
