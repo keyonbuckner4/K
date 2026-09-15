@@ -95,9 +95,17 @@ $100 at exactly the same percentage risk.
    the day beats a forecast, so the model keeps pricing for the scorecard but proposes nothing.
    This replaced the first version after its scorecard showed every afternoon "edge" was the model
    not knowing what the market already knew.
-3. **Crypto thresholds** (`crypto`): BTC/ETH levels priced as barrier options from Kraken spot and
-   Deribit's DVOL implied-volatility index (realized vol only as a logged fallback).
-8. **Economics** (`economics`): normal consensus views you write in `config/econ_views.toml`.
+3. **Crypto thresholds** (`crypto`): BTC/ETH levels priced as barrier options from Kraken spot.
+   The volatility input is matched to the horizon, because a 15-minute ladder and a daily one share
+   an underlying but not a horizon: below `short_horizon_hours` the model uses realized volatility
+   over a short window of fine-grained candles, above it Deribit's DVOL 30-day implied index
+   (realized only as a logged fallback). Using DVOL on an intraday market would misprice every one.
+   Intraday and hourly ladders are adopted by ticker prefix through discovery.
+4. **Economics** (`economics`): normal consensus views you write in `config/econ_views.toml`. There
+   is no free live feed for an economic release, so it prices only events you have a view for. With
+   discovery on it still finds every open economics event and logs each by name as "no consensus
+   view configured", which is the list worth writing views for. Arbitrage covers the same events
+   structurally in the meantime.
 
 Every directional candidate also passes the gate's fifth rule: it must be priced strictly inside
 5c-95c. The bot never bets against a market that is already near certain; the first observe
@@ -159,6 +167,36 @@ undocumented API response, crash with traceback) is written to `data\logs\bot.de
 copy refuses to start; stop an interactive run (Ctrl-C) before installing the task. The PC still has to be on and
 logged in; for true 24/7 use a small always-on server (roadmap item 5).
 
+## Finding markets: `bot discover`
+
+Series tickers cannot be guessed. `KXBTCD` is the daily Bitcoin ladder, but the name of the
+15-minute one, the oil one, or a given economic release is not something to invent, and the
+operating rules say the bot does not guess at the API. So it asks the exchange:
+
+```
+uv run bot discover                     # every open series, grouped
+uv run bot discover --category oil      # by category, ticker or title text
+uv run bot discover --max-minutes 30    # only the intraday ladders
+uv run bot discover --unconfigured      # only what no strategy is pointed at yet
+```
+
+Each row gives the series ticker, its horizon (intraday, hourly, daily, multi-day) worked out from
+when its markets actually close, the market count, the category, and which strategy already uses it.
+
+Strategies then adopt what matches them, refreshed hourly, so a newly listed ladder is traded
+without anyone editing a config file:
+
+- **By ticker prefix**, where the underlying is known. `series_patterns = { BTC = ["KXBTC"], ETH =
+  ["KXETH"] }` under `[strategies.crypto]` picks up every Bitcoin and Ethereum ladder, intraday and
+  daily alike.
+- **By event category**, where the tickers are unknowable in advance. `categories = ["commodit",
+  "energy", "oil", "econom", ...]` under `[strategies.ladder_arb]` is how oil and the economic
+  releases get covered: arbitrage needs no model, no forecast and no price feed, because a ladder
+  whose YES asks sum below a dollar after fees is mispriced whatever the underlying is.
+
+Blocked categories (sport, politics) are filtered out before any strategy sees them, and
+`max_discovered_series` caps how many are adopted, keeping the busiest.
+
 ## Evidence without waiting: `bot backfill`
 
 Forward observation is limited by how fast markets settle. The daily crypto ladders settle once a
@@ -209,16 +247,20 @@ log as `model scoring failed` with a traceback.
 2. **Model rewrite, built 2026-09-14 (this phase).** Weather: observation floor/cap, remaining-hours forecast,
    morning trading window. Crypto: DVOL implied volatility. Gate: no bets against near-certain markets.
    Scorecard: per-strategy table and the trade-time Brier comparison. Engine: watchdog restart on a hang.
-3. **Backfill, built 2026-09-15.** `bot backfill` replays the crypto model over already-settled
+3. **Market breadth, built 2026-09-15.** Series discovery plus `bot discover`; intraday crypto by
+   ticker prefix with horizon-matched volatility; oil and economics reached by category through
+   ladder arbitrage, which needs no model. Weather unchanged.
+4. **Backfill, built 2026-09-15.** `bot backfill` replays the crypto model over already-settled
    markets so its verdict does not have to wait for new ones; `bot gaps --summary` gives the
    arbitrage verdict directly. Neither can shortcut execution risk, which still needs a live run.
-4. **Observe period 2, in progress.** Same scorecard, same bar: verdict green on at least 20 contested
+5. **Observe period 2, in progress.** Same scorecard, same bar: verdict green on at least 20 contested
    settlements over several days AND "model knew better" at trade time, per strategy. Expect a week.
-5. **Position manager (approved, after step 4).** Take-profit / edge-gone / time-based exits for open
+6. **Position manager (approved, after step 5).** Take-profit / edge-gone / time-based exits for open
    positions through the same reduce-only path, observe-first.
-6. **Edge-threshold sweep.** Only once a strategy's verdict is green: score the logged decisions as if the
+7. **Edge-threshold sweep.** Only once a strategy's verdict is green: score the logged decisions as if the
    gate's minimum net edge were 3c or 4c instead of 5c, and report trades per week and pessimistic P&L per
    threshold. A lower threshold on a losing model only multiplies losing trades.
-7. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
-8. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
-   venue; set `strategies.weather.nws_user_agent` to a real contact.
+8. **24/7 hosting.** Move the bot to a small always-on Linux server before any live trading; one-paste installer.
+9. **Housekeeping.** Read-only market commands (`markets`, `events`, `book`) should read from the market-data
+   venue; set `strategies.weather.nws_user_agent` to a real contact. Directional oil pricing needs a WTI spot
+   and volatility feed; none is verified yet, so oil is arbitrage-only for now.
